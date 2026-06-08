@@ -90,6 +90,13 @@ lone `.md`, you get a folder `~/Downloads/<Title>-<ts>/` with `conversation.md`
 fetches each picture directly (no CORS) with a progress bar. This is a
 whole-thread snapshot and doesn't touch the incremental watermark.
 
+**Sources as footnotes:** tick **"Sources as footnotes"** to convert web-search
+citations into GFM footnotes — an inline `[^n]` where ChatGPT showed each source
+chip, plus a `[^n]: [Title](url)` block at the end (deduplicated by URL, only the
+references actually cited). Off by default (citations are stripped) so
+strict-CommonMark wikis stay clean. Anchored references only — the extra
+"Sources panel" entries aren't included.
+
 **Raw JSON (tune the cleanup):** hold **⌥ Option** while clicking Download or
 Copy — both buttons switch to the raw `/backend-api/conversation` response
 (`…-raw.json`) instead of Markdown: the full mapping tree with every

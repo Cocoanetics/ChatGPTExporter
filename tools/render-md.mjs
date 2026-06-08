@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-// Offline renderer that MIRRORS extension/exporter.js's cleanup + turn
-// selection, for tuning the Markdown against a raw conversation JSON saved via
-// the extension's ⌥ Download JSON. Images are placeholdered (no auth to resolve
-// them offline). It also prints an artifact scan so leftovers are easy to spot.
+// Offline renderer that MIRRORS extension/exporter.js's cleanup + turn selection,
+// for tuning the Markdown against a raw conversation JSON (⌥ Download JSON).
+// Images are placeholdered (no auth offline). Web-search citations are converted
+// to GFM footnotes: inline [^n] at each grouped_webpages position + a definition
+// block at the end. Prints an artifact scan too.
 //
 //   node tools/render-md.mjs ~/Downloads/whatever-raw.json [out.md]
 //
-// Keep the selection/cleanup below IN SYNC with exporter.js.
+// Keep the selection/cleanup IN SYNC with exporter.js.
 import fs from "node:fs";
 
 const inPath = process.argv[2];
@@ -27,15 +28,42 @@ const stripDirectives = (s) =>
   s.replace(/:::[A-Za-z][\w-]*(?:\{[^}]*\})?/g, "").replace(/^[ \t]*:::[ \t]*$/gm, "");
 const isImagePart = (p) => p && p.content_type === "image_asset_pointer";
 const hasImage = (m) => ((m.content && m.content.parts) || []).some(isImagePart);
-const textOf = (m) => {
+
+const rawTextOf = (m) => {
   const parts = (m.content && m.content.parts) || [];
-  const rendered = parts.map((p) =>
-    typeof p === "string" ? p : isImagePart(p) ? "_[image omitted]_" : ""
-  );
-  return stripDirectives(stripCitations(rendered.join("\n\n")))
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return parts.map((p) => (typeof p === "string" ? p : isImagePart(p) ? "_[image omitted]_" : "")).join("\n\n");
+};
+const clean = (s) =>
+  stripDirectives(stripCitations(s)).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+
+// Document-wide footnote registry (dedupe by URL).
+const notes = [];
+const noteByUrl = new Map();
+const noteNum = (url, title) => {
+  if (!noteByUrl.has(url)) {
+    notes.push({ num: notes.length + 1, title: title || url, url });
+    noteByUrl.set(url, notes.length);
+  }
+  return noteByUrl.get(url);
+};
+
+// Splice [^n] markers in for each grouped_webpages citation (highest index first
+// so earlier offsets stay valid), then clean the leftover non-web tokens.
+const renderText = (m, footnotes) => {
+  let raw = rawTextOf(m);
+  if (footnotes) {
+    const refs = ((m.metadata && m.metadata.content_references) || [])
+      .filter((r) => r.type === "grouped_webpages" && Number.isInteger(r.start_idx) && Number.isInteger(r.end_idx))
+      .sort((a, b) => b.start_idx - a.start_idx);
+    for (const ref of refs) {
+      const markers = (ref.items || [])
+        .filter((it) => it && it.url)
+        .map((it) => `[^${noteNum(it.url, it.title)}]`)
+        .join("");
+      raw = raw.slice(0, ref.start_idx) + markers + raw.slice(ref.end_idx);
+    }
+  }
+  return clean(raw);
 };
 
 const path = [];
@@ -57,36 +85,30 @@ for (const { msg } of path) {
   else if (role === "assistant") speaker = "ChatGPT";
   else if (role === "tool" && hasImage(msg)) speaker = "ChatGPT";
   else continue;
-  const text = textOf(msg);
+  const text = renderText(msg, true);
   if (!text) continue;
   turns.push(`## ${speaker}\n\n${text}\n`);
 }
-const md = `# ${convo.title || "ChatGPT conversation"}\n\n` + turns.join("\n");
+let md = `# ${convo.title || "ChatGPT conversation"}\n\n` + turns.join("\n");
+
+// Append footnote definitions that are actually referenced.
+const used = new Set([...md.matchAll(/\[\^(\d+)\]/g)].map((m) => Number(m[1])));
+const defs = notes.filter((n) => used.has(n.num)).map((n) => `[^${n.num}]: [${n.title}](${n.url})`);
+if (defs.length) md += "\n" + defs.join("\n") + "\n";
 // ---- end mirror ----
 
 const outPath = process.argv[3] ? resolve(process.argv[3]) : resolve(inPath).replace(/\.json$/i, "") + ".md";
 fs.writeFileSync(outPath, md, "utf8");
 
-// ---- artifact scan ----
 const findings = [];
-const pua = [...md].filter((ch) => {
-  const c = ch.codePointAt(0);
-  return c >= 0xe000 && c <= 0xf8ff;
-});
-if (pua.length) {
-  const codes = [...new Set(pua.map((c) => "U+" + c.codePointAt(0).toString(16).toUpperCase()))];
-  findings.push(`private-use chars (likely citation/smart tokens): ${pua.length} - ${codes.join(", ")}`);
-}
+const pua = [...md].filter((ch) => ch.codePointAt(0) >= 0xe000 && ch.codePointAt(0) <= 0xf8ff);
+if (pua.length) findings.push(`private-use chars left: ${pua.length}`);
 for (const [label, re] of [
   ["::: directive", /:::/g],
-  ["bracket U+3010/3011", /[【】]/g],
   ["cite/turn/navlist token", /cite[a-z0-9]*|turn\d+\w*|navlist/gi],
-  ["sentinel @@IMG@@", /@@IMG@@/g],
 ]) {
   const hits = md.match(re);
   if (hits) findings.push(`${label}: ${hits.length} - e.g. ${JSON.stringify(hits.slice(0, 4))}`);
 }
-
-console.log(`Wrote ${outPath}\n${turns.length} turns, ${md.length} chars`);
-console.log("\nArtifact scan:");
-console.log(findings.length ? findings.map((f) => "  ! " + f).join("\n") : "  ok - no known markers found");
+console.log(`Wrote ${outPath}\n${turns.length} turns, ${defs.length} footnotes, ${md.length} chars`);
+console.log("Artifact scan:", findings.length ? findings.join("; ") : "ok - clean");

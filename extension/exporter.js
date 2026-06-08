@@ -19,7 +19,7 @@
 // `images: [{ fileId, url, name }]`, and rewrites the image placeholders to
 // `images/<name>` links so a folder export resolves.
 
-async function pageExport(raw, withImages) {
+async function pageExport(raw, withImages, footnotes) {
   const convId = location.pathname.split("/").filter(Boolean).pop();
   if (!convId) {
     return { error: "No conversation is open. Open a chat first, then export." };
@@ -80,27 +80,58 @@ async function pageExport(raw, withImages) {
   const isImagePart = (p) => p && p.content_type === "image_asset_pointer";
   const hasImage = (m) => ((m.content && m.content.parts) || []).some(isImagePart);
 
-  // With images, image parts emit an ASCII sentinel (survives the cleanup
-  // passes; fully substituted before return) instead of the text marker.
+  // Document-wide footnote registry (dedupe web-search sources by URL).
+  const notes = [];
+  const noteByUrl = new Map();
+  const noteNum = (url, title) => {
+    if (!noteByUrl.has(url)) {
+      notes.push({ num: notes.length + 1, title: title || url, url });
+      noteByUrl.set(url, notes.length);
+    }
+    return noteByUrl.get(url);
+  };
+
+  // With images, image parts emit an ASCII sentinel (substituted before return)
+  // instead of the text marker.
   const pendingFiles = [];
-  const textOf = (m) => {
+  const rawTextOf = (m) => {
     const parts = (m.content && m.content.parts) || [];
-    const rendered = parts.map((p) => {
-      if (typeof p === "string") return p;
-      if (isImagePart(p)) {
-        const fid = fileIdOf(p.asset_pointer);
-        if (withImages && fid) {
-          pendingFiles.push(fid);
-          return `@@IMG@@${fid}@@`;
+    return parts
+      .map((p) => {
+        if (typeof p === "string") return p;
+        if (isImagePart(p)) {
+          const fid = fileIdOf(p.asset_pointer);
+          if (withImages && fid) {
+            pendingFiles.push(fid);
+            return `@@IMG@@${fid}@@`;
+          }
+          return "_[image omitted]_";
         }
-        return "_[image omitted]_";
+        return "";
+      })
+      .join("\n\n");
+  };
+  const clean = (s) =>
+    stripDirectives(stripCitations(s)).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+
+  // With footnotes, splice [^n] markers in at each grouped_webpages citation
+  // (highest index first so earlier offsets stay valid), then clean the leftover
+  // (non-web) tokens.
+  const renderText = (m) => {
+    let raw = rawTextOf(m);
+    if (footnotes) {
+      const refs = ((m.metadata && m.metadata.content_references) || [])
+        .filter((r) => r.type === "grouped_webpages" && Number.isInteger(r.start_idx) && Number.isInteger(r.end_idx))
+        .sort((a, b) => b.start_idx - a.start_idx);
+      for (const ref of refs) {
+        const markers = (ref.items || [])
+          .filter((it) => it && it.url)
+          .map((it) => `[^${noteNum(it.url, it.title)}]`)
+          .join("");
+        raw = raw.slice(0, ref.start_idx) + markers + raw.slice(ref.end_idx);
       }
-      return "";
-    });
-    return stripDirectives(stripCitations(rendered.join("\n\n")))
-      .replace(/[ \t]+\n/g, "\n")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
+    }
+    return clean(raw);
   };
 
   // file id -> { name, mime } harvested from message attachments (uploads).
@@ -124,12 +155,13 @@ async function pageExport(raw, withImages) {
       if (a && a.id) attMeta[a.id] = { name: a.name, mime: a.mime_type };
     }
 
-    const text = textOf(msg);
+    const text = renderText(msg);
     if (!text) continue;
     turns.push({ id, role, md: `## ${speaker}\n\n${text}\n` });
   }
 
   const result = { convId, title: convo.title || "ChatGPT conversation", turns };
+  if (footnotes) result.footnotes = notes;
 
   if (withImages) {
     // Try both known download-endpoint shapes; the pre-signed download_url then

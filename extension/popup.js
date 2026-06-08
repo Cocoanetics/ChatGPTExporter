@@ -12,6 +12,7 @@ const downloadBtn = document.getElementById("download");
 const copyBtn = document.getElementById("copy");
 const fullToggle = document.getElementById("full");
 const imagesToggle = document.getElementById("images");
+const footnotesToggle = document.getElementById("footnotes");
 const progressEl = document.getElementById("progress");
 
 const NATIVE_APP = "com.drobnik.chatgptexporter";
@@ -65,11 +66,22 @@ function safeName(title) {
   return title.replace(/[\\/:*?"<>|]+/g, "_").trim().slice(0, 80) || "chatgpt";
 }
 
+// Append GFM footnote definitions for the citations actually referenced in `md`.
+function appendFootnotes(md, notes) {
+  if (!notes || !notes.length) return md;
+  const used = new Set([...md.matchAll(/\[\^(\d+)\]/g)].map((m) => Number(m[1])));
+  const defs = notes
+    .filter((n) => used.has(n.num))
+    .map((n) => `[^${n.num}]: [${n.title}](${n.url})`);
+  return defs.length ? `${md}\n${defs.join("\n")}\n` : md;
+}
+
 // Whole-conversation snapshot into ~/Downloads/<Title-ts>/: conversation.md plus
 // an images/ folder. Not incremental and leaves the watermark untouched.
 async function exportFolder(result) {
   const folder = `${safeName(result.title)}-${timestamp()}`;
-  const md = `# ${result.title}\n\n` + result.turns.map((t) => t.md).join("\n");
+  let md = `# ${result.title}\n\n` + result.turns.map((t) => t.md).join("\n");
+  md = appendFootnotes(md, result.footnotes);
 
   try {
     await saveViaNative("conversation.md", md, folder);
@@ -113,13 +125,14 @@ async function runExport(mode, raw) {
     }
 
     const withImages = mode === "download" && !raw && imagesToggle.checked;
+    const wantFootnotes = !raw && footnotesToggle.checked;
 
     let injection;
     try {
       [injection] = await browser.scripting.executeScript({
         target: { tabId: tab.id },
         func: pageExport,
-        args: [raw, withImages],
+        args: [raw, withImages, wantFootnotes],
       });
     } catch (e) {
       setStatus("Couldn't reach the page. Open a ChatGPT chat and try again.", "err");
@@ -164,6 +177,7 @@ async function runExport(mode, raw) {
 
     let md = fresh.map((t) => t.md).join("\n");
     if (firstRun) md = `# ${result.title}\n\n${md}`;
+    md = appendFootnotes(md, result.footnotes);
     const label = firstRun ? "the whole chat" : `${fresh.length} new message${fresh.length === 1 ? "" : "s"}`;
     const advanceIds = Array.from(new Set([...seen, ...fresh.map((t) => t.id)]));
 
