@@ -247,7 +247,18 @@ async function pageExport(raw, withFiles, footnotes) {
       files.push({ fileId: fid, url: resolved.url, name });
     }
     for (const sf of sandboxFiles) {
-      files.push({ fileId: sf.name, url: sf.url, name: sf.name });
+      // interpreter/download returns JSON { download_url: <signed estuary URL> },
+      // like the files endpoint — resolve it here, then let the native side fetch
+      // the signed URL (with the bearer token), same as images.
+      try {
+        const r = await fetch(sf.url, { headers: { Authorization: `Bearer ${accessToken}` } });
+        if (!r.ok) continue;
+        const j = await r.json();
+        const dl = j.download_url || (j.metadata && j.metadata.download_url);
+        if (dl) files.push({ fileId: sf.name, url: dl, name: sf.name });
+      } catch (e) {
+        // sandbox file unavailable (ephemeral / expired)
+      }
     }
 
     const sub = (md) =>
