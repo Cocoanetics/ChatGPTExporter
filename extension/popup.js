@@ -2,8 +2,9 @@
 //
 // Drives the toolbar popup: injects pageExport() into the active ChatGPT tab,
 // diffs the returned turns against this conversation's watermark in extension
-// storage, and emits only the new Markdown (downloaded as a .md file and copied
-// to the clipboard). Safari exposes the promise-based `browser.*` namespace.
+// storage, and emits only the new Markdown — copied to the clipboard and written
+// to ~/Downloads by the native handler. Safari exposes the promise-based
+// `browser.*` namespace.
 
 const statusEl = document.getElementById("status");
 const exportBtn = document.getElementById("export");
@@ -22,23 +23,21 @@ async function getActiveTab() {
   return tab;
 }
 
-// Save via an anchor click in the popup, during the button's user gesture: that
-// gesture is what makes Safari honor the `download` filename. (A programmatic
-// click from the page has no gesture, so Safari ignores the name and saves the
-// file as "Unknown" with no extension.) application/octet-stream forces a real
-// download instead of an inline preview; the bytes are UTF-8, so umlauts and
-// emoji stay intact. Trade-off: from the popup, Safari's one-time download
-// prompt shows a blank "" source — just click Allow. (A page-initiated save
-// would label the source "chatgpt.com" but then drop the filename.)
-function saveFile(filename, text) {
-  const url = URL.createObjectURL(new Blob([text], { type: "application/octet-stream" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
+// Hand the file to the native app extension (SafariWebExtensionHandler), which
+// writes it straight to ~/Downloads with the exact filename. This sidesteps
+// Safari's whole download path — no "allow downloads" prompt, no "Unknown"
+// filename, no inline preview — because no browser download happens at all.
+// Returns the absolute path the native side wrote.
+async function saveViaNative(filename, text) {
+  const resp = await browser.runtime.sendNativeMessage("com.drobnik.chatgptexporter", {
+    action: "save",
+    filename,
+    text,
+  });
+  if (!resp || !resp.ok) {
+    throw new Error((resp && resp.error) || "native save failed");
+  }
+  return resp.path;
 }
 
 function timestamp() {
@@ -89,9 +88,9 @@ exportBtn.addEventListener("click", async () => {
     if (debug) {
       // Dump the full raw conversation JSON for tuning the cleanup rules.
       // Inspection, not a real export — leave the watermark untouched.
-      saveFile(`${safeName(result.title)}-${timestamp()}-raw.json`, result.raw || "{}");
+      const path = await saveViaNative(`${safeName(result.title)}-${timestamp()}-raw.json`, result.raw || "{}");
       setStatus(
-        `✓ Saved raw JSON (${Math.round((result.raw || "").length / 1024)} KB). Tune cleanup, then re-run with Debug off.`,
+        `✓ Saved raw JSON (${Math.round((result.raw || "").length / 1024)} KB) to ${path.split("/").pop()}. Tune cleanup, then re-run with Debug off.`,
         "ok"
       );
       return;
@@ -120,15 +119,25 @@ exportBtn.addEventListener("click", async () => {
     } catch (e) {
       copied = false;
     }
-    saveFile(`${safeName(result.title)}-${timestamp()}.md`, markdown);
+    let savedPath;
+    try {
+      savedPath = await saveViaNative(`${safeName(result.title)}-${timestamp()}.md`, markdown);
+    } catch (e) {
+      // Leave the watermark untouched so the next run re-offers these turns.
+      setStatus(
+        `Save failed: ${e.message}.${copied ? " The Markdown is on your clipboard." : ""}`,
+        "err"
+      );
+      return;
+    }
 
-    // Advance the watermark.
+    // Advance the watermark only after a successful save.
     const merged = Array.from(new Set([...seen, ...fresh.map((t) => t.id)]));
     await browser.storage.local.set({ [key]: { exported: merged, updated: Date.now() } });
 
     const scope = firstRun ? "the whole chat" : `${fresh.length} new message${fresh.length === 1 ? "" : "s"}`;
     setStatus(
-      `✓ Exported ${scope}.${copied ? " Copied to clipboard;" : ""} saved a .md to Downloads.`,
+      `✓ Exported ${scope}.${copied ? " Copied to clipboard;" : ""} saved ${savedPath.split("/").pop()} to Downloads.`,
       "ok"
     );
   } catch (e) {

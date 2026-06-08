@@ -434,12 +434,11 @@
 		A7DD5D3F2FD6B46600A08EE6 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "ChatGPT Exporter Extension/ChatGPT Exporter Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = Z7L2YCUH45;
 				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
-				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ChatGPT Exporter Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "ChatGPT Exporter Extension";
@@ -469,12 +468,11 @@
 		A7DD5D402FD6B46600A08EE6 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "ChatGPT Exporter Extension/ChatGPT Exporter Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = Z7L2YCUH45;
 				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
-				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ChatGPT Exporter Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "ChatGPT Exporter Extension";
