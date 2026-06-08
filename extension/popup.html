@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>Export ChatGPT&nbsp;→&nbsp;Markdown</h1>
+
+  <button id="export" type="button">Export this chat</button>
+
+  <label class="row">
+    <input type="checkbox" id="full">
+    Re-export the whole chat (ignore what was pulled before)
+  </label>
+
+  <p id="status" class="muted">Open a ChatGPT conversation, then click Export.</p>
+
+  <!-- exporter.js defines pageExport(); it is injected into the page by popup.js -->
+  <script src="exporter.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

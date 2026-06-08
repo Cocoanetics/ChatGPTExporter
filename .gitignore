@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Xcode / build output (the generated app wrapper)
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.moved-aside
+
+# Swift Package Manager (if added later)
+.build/
+.swiftpm/
