@@ -2,12 +2,13 @@
 //
 // Drives the toolbar popup: injects pageExport() into the active ChatGPT tab,
 // diffs the returned turns against this conversation's watermark in extension
-// storage, and emits only the new Markdown — copied to the clipboard and written
-// to ~/Downloads by the native handler. Safari exposes the promise-based
+// storage, and delivers the new Markdown either as a file in ~/Downloads (via
+// the native handler) or onto the clipboard. Safari exposes the promise-based
 // `browser.*` namespace.
 
 const statusEl = document.getElementById("status");
-const exportBtn = document.getElementById("export");
+const downloadBtn = document.getElementById("download");
+const copyBtn = document.getElementById("copy");
 const fullToggle = document.getElementById("full");
 const debugToggle = document.getElementById("debug");
 
@@ -18,16 +19,20 @@ function setStatus(message, kind = "") {
   statusEl.className = kind;
 }
 
+function setBusy(busy) {
+  downloadBtn.disabled = busy;
+  copyBtn.disabled = busy;
+}
+
 async function getActiveTab() {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   return tab;
 }
 
 // Hand the file to the native app extension (SafariWebExtensionHandler), which
-// writes it straight to ~/Downloads with the exact filename. This sidesteps
-// Safari's whole download path — no "allow downloads" prompt, no "Unknown"
-// filename, no inline preview — because no browser download happens at all.
-// Returns the absolute path the native side wrote.
+// writes it straight to ~/Downloads with the exact filename — no browser
+// download, so no prompt, no "Unknown" name, no inline preview. Returns the
+// absolute path the native side wrote.
 async function saveViaNative(filename, text) {
   const resp = await browser.runtime.sendNativeMessage("com.drobnik.chatgptexporter", {
     action: "save",
@@ -49,9 +54,12 @@ function safeName(title) {
   return title.replace(/[\\/:*?"<>|]+/g, "_").trim().slice(0, 80) || "chatgpt";
 }
 
-exportBtn.addEventListener("click", async () => {
-  exportBtn.disabled = true;
-  setStatus("Exporting…");
+// Shared pipeline for both actions. `mode` is "download" or "copy" — the only
+// difference is where the rendered content goes. Debug mode swaps the content
+// for the raw conversation JSON and leaves the watermark untouched.
+async function runExport(mode) {
+  setBusy(true);
+  setStatus(mode === "download" ? "Exporting…" : "Copying…");
 
   try {
     const tab = await getActiveTab();
@@ -62,7 +70,6 @@ exportBtn.addEventListener("click", async () => {
 
     const debug = debugToggle.checked;
 
-    // Run the exporter inside the page (carries the session cookies).
     let injection;
     try {
       [injection] = await browser.scripting.executeScript({
@@ -85,64 +92,64 @@ exportBtn.addEventListener("click", async () => {
       return;
     }
 
+    // Decide what to deliver and whether to advance the watermark.
+    let content, filename, label;
+    let advance = null;
     if (debug) {
-      // Dump the full raw conversation JSON for tuning the cleanup rules.
-      // Inspection, not a real export — leave the watermark untouched.
-      const path = await saveViaNative(`${safeName(result.title)}-${timestamp()}-raw.json`, result.raw || "{}");
-      setStatus(
-        `✓ Saved raw JSON (${Math.round((result.raw || "").length / 1024)} KB) to ${path.split("/").pop()}. Tune cleanup, then re-run with Debug off.`,
-        "ok"
-      );
-      return;
+      content = result.raw || "{}";
+      filename = `${safeName(result.title)}-${timestamp()}-raw.json`;
+      label = `raw JSON (${Math.round(content.length / 1024)} KB)`;
+    } else {
+      const key = storeKey(result.convId);
+      const stored = fullToggle.checked ? null : (await browser.storage.local.get(key))[key];
+      const seen = new Set((stored && stored.exported) || []);
+      const firstRun = seen.size === 0;
+
+      const fresh = result.turns.filter((t) => !seen.has(t.id));
+      if (fresh.length === 0) {
+        setStatus("✓ Up to date — no new messages since the last pull.", "ok");
+        return;
+      }
+
+      let md = fresh.map((t) => t.md).join("\n");
+      if (firstRun) md = `# ${result.title}\n\n${md}`; // title only on the first pull
+      content = md;
+      filename = `${safeName(result.title)}-${timestamp()}.md`;
+      label = firstRun ? "the whole chat" : `${fresh.length} new message${fresh.length === 1 ? "" : "s"}`;
+      advance = { key, ids: Array.from(new Set([...seen, ...fresh.map((t) => t.id)])) };
     }
 
-    // Watermark diff: which turn ids has this conversation already exported?
-    const key = storeKey(result.convId);
-    const reExportAll = fullToggle.checked;
-    const stored = reExportAll ? null : (await browser.storage.local.get(key))[key];
-    const seen = new Set((stored && stored.exported) || []);
-    const firstRun = seen.size === 0;
-
-    const fresh = result.turns.filter((t) => !seen.has(t.id));
-    if (fresh.length === 0) {
-      setStatus("✓ Up to date — no new messages since the last pull.", "ok");
-      return;
+    // Deliver, then advance the watermark only on a successful delivery.
+    if (mode === "copy") {
+      try {
+        await navigator.clipboard.writeText(content);
+      } catch (e) {
+        setStatus("Copy failed: " + (e && e.message ? e.message : e), "err");
+        return;
+      }
+      if (advance) {
+        await browser.storage.local.set({ [advance.key]: { exported: advance.ids, updated: Date.now() } });
+      }
+      setStatus(`✓ Copied ${label} to the clipboard.`, "ok");
+    } else {
+      let path;
+      try {
+        path = await saveViaNative(filename, content);
+      } catch (e) {
+        setStatus("Save failed: " + (e && e.message ? e.message : e), "err");
+        return;
+      }
+      if (advance) {
+        await browser.storage.local.set({ [advance.key]: { exported: advance.ids, updated: Date.now() } });
+      }
+      setStatus(`✓ Saved ${label} → ${path.split("/").pop()} in Downloads.`, "ok");
     }
-
-    let markdown = fresh.map((t) => t.md).join("\n");
-    if (firstRun) markdown = `# ${result.title}\n\n${markdown}`; // title only on the first pull
-
-    // Clipboard first (the primary path for pasting into a wiki), then the file.
-    let copied = true;
-    try {
-      await navigator.clipboard.writeText(markdown);
-    } catch (e) {
-      copied = false;
-    }
-    let savedPath;
-    try {
-      savedPath = await saveViaNative(`${safeName(result.title)}-${timestamp()}.md`, markdown);
-    } catch (e) {
-      // Leave the watermark untouched so the next run re-offers these turns.
-      setStatus(
-        `Save failed: ${e.message}.${copied ? " The Markdown is on your clipboard." : ""}`,
-        "err"
-      );
-      return;
-    }
-
-    // Advance the watermark only after a successful save.
-    const merged = Array.from(new Set([...seen, ...fresh.map((t) => t.id)]));
-    await browser.storage.local.set({ [key]: { exported: merged, updated: Date.now() } });
-
-    const scope = firstRun ? "the whole chat" : `${fresh.length} new message${fresh.length === 1 ? "" : "s"}`;
-    setStatus(
-      `✓ Exported ${scope}.${copied ? " Copied to clipboard;" : ""} saved ${savedPath.split("/").pop()} to Downloads.`,
-      "ok"
-    );
   } catch (e) {
     setStatus("Error: " + (e && e.message ? e.message : String(e)), "err");
   } finally {
-    exportBtn.disabled = false;
+    setBusy(false);
   }
-});
+}
+
+downloadBtn.addEventListener("click", () => runExport("download"));
+copyBtn.addEventListener("click", () => runExport("copy"));

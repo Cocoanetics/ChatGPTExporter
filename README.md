@@ -66,17 +66,15 @@ A 🟢 button appears in the toolbar.
 ## Usage
 
 1. Open the conversation in Safari (the account that owns the chat).
-2. Click the toolbar button → **Export this chat**.
-3. The Markdown is **copied to your clipboard** (paste straight into your wiki)
-   and saved as `Title-YYYY-MM-DD-HH-MM.md` in your **Downloads** folder — UTF-8,
-   so umlauts and emoji survive intact.
+2. Click **Download .md** to write the file, or **Copy** to put the Markdown on
+   the clipboard for pasting straight into your wiki.
+3. **Download** writes `Title-YYYY-MM-DD-HH-MM.md` to your **Downloads** folder.
+   The native handler writes it directly — so there's **no download prompt**, the
+   filename is exact, and the bytes are UTF-8 (umlauts and emoji intact).
 
-   > The first save triggers Safari's **"allow downloads"** prompt — click Allow
-   > (it won't ask again). The source shows blank because the save runs from the
-   > extension popup, which is required so Safari keeps the filename (a
-   > page-initiated save would name the source `chatgpt.com` but lose the name).
-   > There's no save-location picker for Safari extensions, so files go to
-   > Downloads; the clipboard copy is the main path.
+   > No save-location picker exists for Safari extensions, so the file always
+   > lands in Downloads with the exact name. Both actions are incremental and
+   > advance the watermark (below).
 
 **Incremental pulls:** run it again later on the same chat and you get only the
 messages added since last time. If nothing's new, it says so and downloads
@@ -86,12 +84,13 @@ by conversation id — so do your top-ups from the same Mac/profile.
 **Re-export everything:** tick **"Re-export the whole chat"** to ignore the
 watermark and dump the full conversation again (this also resets the watermark).
 
-**Debug (tune the cleanup):** tick **"Debug: save raw conversation JSON"** to save
-the raw `/backend-api/conversation` response (`…-raw.json`) instead of Markdown —
-the full mapping tree with every `content_type` and metadata field. Inspect it to
-spot new artifacts to strip (citations, `:::` directives, …), then refine the
-`stripCitations` / `stripDirectives` rules in `extension/exporter.js`. Debug mode
-ignores the watermark.
+**Debug (tune the cleanup):** tick **"Debug: raw conversation JSON"** — Download
+or Copy then gives you the raw `/backend-api/conversation` response (`…-raw.json`)
+instead of Markdown: the full mapping tree with every `content_type` and metadata
+field. Inspect it to spot new artifacts to strip (citations, `:::` directives, …),
+then refine the `stripCitations` / `stripDirectives` rules in
+`extension/exporter.js` (use `tools/render-md.mjs` to validate offline). Debug
+mode ignores the watermark.
 
 ## Limitations
 

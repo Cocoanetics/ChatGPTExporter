@@ -8,7 +8,10 @@
 <body>
   <h1>Export ChatGPT&nbsp;→&nbsp;Markdown</h1>
 
-  <button id="export" type="button">Export this chat</button>
+  <div class="actions">
+    <button id="download" type="button">Download .md</button>
+    <button id="copy" type="button" class="secondary">Copy</button>
+  </div>
 
   <label class="row">
     <input type="checkbox" id="full">
@@ -17,10 +20,10 @@
 
   <label class="row">
     <input type="checkbox" id="debug">
-    Debug: save raw conversation JSON (to tune cleanup)
+    Debug: raw conversation JSON (to tune cleanup)
   </label>
 
-  <p id="status" class="muted">Open a ChatGPT conversation, then click Export.</p>
+  <p id="status" class="muted">Open a ChatGPT conversation, then Download or Copy.</p>
 
   <!-- exporter.js defines pageExport(); it is injected into the page by popup.js -->
   <script src="exporter.js"></script>
