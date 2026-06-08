@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Offline renderer that MIRRORS extension/exporter.js's cleanup, for tuning the
-// Markdown against a raw conversation JSON saved via the extension's Debug mode.
+// Offline renderer that MIRRORS extension/exporter.js's cleanup + turn
+// selection, for tuning the Markdown against a raw conversation JSON saved via
+// the extension's ⌥ Download JSON. Images are placeholdered (no auth to resolve
+// them offline). It also prints an artifact scan so leftovers are easy to spot.
 //
-//   node tools/render-md.mjs ~/Downloads/Unknown.json [out.md]
+//   node tools/render-md.mjs ~/Downloads/whatever-raw.json [out.md]
 //
-// Keep the cleanup below IN SYNC with exporter.js. It also prints an artifact
-// scan (private-use citation tokens, stray ::: / brackets, control chars, and
-// any non-letter non-ASCII characters) so leftovers are easy to spot.
+// Keep the selection/cleanup below IN SYNC with exporter.js.
 import fs from "node:fs";
 
 const inPath = process.argv[2];
@@ -21,14 +21,12 @@ const convo = JSON.parse(fs.readFileSync(resolve(inPath), "utf8"));
 const stripCitations = (s) => s.replace(/【[^】]*】/g, "");
 const stripDirectives = (s) =>
   s.replace(/:::[A-Za-z][\w-]*(?:\{[^}]*\})?/g, "").replace(/^[ \t]*:::[ \t]*$/gm, "");
+const isImagePart = (p) => p && p.content_type === "image_asset_pointer";
+const hasImage = (m) => ((m.content && m.content.parts) || []).some(isImagePart);
 const textOf = (m) => {
   const parts = (m.content && m.content.parts) || [];
   const rendered = parts.map((p) =>
-    typeof p === "string"
-      ? p
-      : p && p.content_type === "image_asset_pointer"
-      ? "_[image omitted]_"
-      : ""
+    typeof p === "string" ? p : isImagePart(p) ? "_[image omitted]_" : ""
   );
   return stripDirectives(stripCitations(rendered.join("\n\n")))
     .replace(/[ \t]+\n/g, "\n")
@@ -36,23 +34,28 @@ const textOf = (m) => {
     .trim();
 };
 
-const pathNodes = [];
+const path = [];
 for (let id = convo.current_node; id; ) {
   const node = convo.mapping[id];
   if (!node) break;
-  if (node.message) pathNodes.push({ id, msg: node.message });
+  if (node.message) path.push({ id, msg: node.message });
   id = node.parent;
 }
-pathNodes.reverse();
+path.reverse();
 
 const turns = [];
-for (const { msg } of pathNodes) {
-  const role = msg.author && msg.author.role;
-  if (role !== "user" && role !== "assistant") continue;
+for (const { msg } of path) {
   if (msg.metadata && msg.metadata.is_visually_hidden_from_conversation) continue;
+  if (msg.recipient && msg.recipient !== "all") continue;
+  const role = msg.author && msg.author.role;
+  let speaker;
+  if (role === "user") speaker = "User";
+  else if (role === "assistant") speaker = "ChatGPT";
+  else if (role === "tool" && hasImage(msg)) speaker = "ChatGPT";
+  else continue;
   const text = textOf(msg);
   if (!text) continue;
-  turns.push(`## ${role === "user" ? "User" : "ChatGPT"}\n\n${text}\n`);
+  turns.push(`## ${speaker}\n\n${text}\n`);
 }
 const md = `# ${convo.title || "ChatGPT conversation"}\n\n` + turns.join("\n");
 // ---- end mirror ----
@@ -74,22 +77,12 @@ for (const [label, re] of [
   ["::: directive", /:::/g],
   ["bracket U+3010/3011", /[【】]/g],
   ["cite/turn/navlist token", /cite[a-z0-9]*|turn\d+\w*|navlist/gi],
+  ["sentinel @@IMG@@", /@@IMG@@/g],
 ]) {
   const hits = md.match(re);
   if (hits) findings.push(`${label}: ${hits.length} - e.g. ${JSON.stringify(hits.slice(0, 4))}`);
 }
-const weird = {};
-for (const ch of md) {
-  const c = ch.codePointAt(0);
-  if (c < 128 || /\p{L}/u.test(ch) || /\p{Emoji}/u.test(ch)) continue;
-  weird[ch] = (weird[ch] || 0) + 1;
-}
-const weirdList = Object.entries(weird).map(
-  ([ch, n]) => `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}x${n}`
-);
 
 console.log(`Wrote ${outPath}\n${turns.length} turns, ${md.length} chars`);
 console.log("\nArtifact scan:");
 console.log(findings.length ? findings.map((f) => "  ! " + f).join("\n") : "  ok - no known markers found");
-console.log("\nNon-letter non-ASCII chars (spaces/punctuation/symbols):");
-console.log("  " + (weirdList.join("  ") || "(none)"));
