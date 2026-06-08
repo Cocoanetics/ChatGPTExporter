@@ -145,11 +145,22 @@ async function runExport(mode, raw) {
       return;
     }
 
-    // ⌥: raw conversation JSON to a single file.
+    // ⌥: raw conversation JSON — copy or save depending on the button.
     if (raw) {
       const content = result.raw || "{}";
-      const path = await saveViaNative(`${safeName(result.title)}-${timestamp()}-raw.json`, content);
-      setStatus(`✓ Saved raw JSON (${Math.round(content.length / 1024)} KB) to ${path.split("/").pop()}.`, "ok");
+      const kb = Math.round(content.length / 1024);
+      if (mode === "copy") {
+        try {
+          await navigator.clipboard.writeText(content);
+        } catch (e) {
+          setStatus("Copy failed: " + (e && e.message ? e.message : e), "err");
+          return;
+        }
+        setStatus(`✓ Copied raw JSON (${kb} KB) to the clipboard.`, "ok");
+      } else {
+        const path = await saveViaNative(`${safeName(result.title)}-${timestamp()}-raw.json`, content);
+        setStatus(`✓ Saved raw JSON (${kb} KB) to ${path.split("/").pop()}.`, "ok");
+      }
       return;
     }
 
