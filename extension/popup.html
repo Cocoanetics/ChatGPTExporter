@@ -18,6 +18,13 @@
     Re-export the whole chat (ignore what was pulled before)
   </label>
 
+  <label class="row">
+    <input type="checkbox" id="images">
+    Download images (whole-thread folder: conversation.md + images/)
+  </label>
+
+  <progress id="progress" class="hidden" value="0" max="1"></progress>
+
   <p id="status" class="muted">Open a ChatGPT conversation, then Download or Copy. (⌥ for raw JSON)</p>
 
   <!-- exporter.js defines pageExport(); it is injected into the page by popup.js -->

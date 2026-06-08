@@ -84,6 +84,12 @@ by conversation id — so do your top-ups from the same Mac/profile.
 **Re-export everything:** tick **"Re-export the whole chat"** to ignore the
 watermark and dump the full conversation again (this also resets the watermark).
 
+**Download images:** tick **"Download images"** and click Download — instead of a
+lone `.md`, you get a folder `~/Downloads/<Title>-<ts>/` with `conversation.md`
+(image links rewritten to `images/…`) and an `images/` folder. The native handler
+fetches each picture directly (no CORS) with a progress bar. This is a
+whole-thread snapshot and doesn't touch the incremental watermark.
+
 **Raw JSON (tune the cleanup):** hold **⌥ Option** while clicking Download or
 Copy — both buttons switch to the raw `/backend-api/conversation` response
 (`…-raw.json`) instead of Markdown: the full mapping tree with every
@@ -94,9 +100,10 @@ validate offline). The raw export ignores the watermark.
 
 ## Limitations
 
-- **Images are placeholdered** as `_[image omitted]_` — their bytes sit behind
-  authenticated URLs. If you need them inline, that's a follow-up (download each
-  `image_asset_pointer` and rewrite the link).
+- **Images** are `_[image omitted]_` in a plain `.md`; tick **Download images** to
+  snapshot the whole thread into a folder with the pictures fetched natively and
+  the links rewritten to `images/…`. The image-pointer parsing is defensive and
+  may need tuning per ChatGPT's current shapes (use ⌥ Download JSON to inspect).
 - **Edits/regenerations re-emit a tail.** If an earlier message is edited, every
   message after it gets a new id and exports again as "new" — correct, since the
   thread genuinely changed, but worth knowing. Pure appends give just the new turns.
