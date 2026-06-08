@@ -18,7 +18,11 @@ const resolve = (p) => p.replace(/^~/, process.env.HOME);
 const convo = JSON.parse(fs.readFileSync(resolve(inPath), "utf8"));
 
 // ---- mirror of exporter.js (keep in sync) ----
-const stripCitations = (s) => s.replace(/【[^】]*】/g, "");
+const CITE_TOKEN = new RegExp(
+  String.fromCharCode(0xe200) + "[\\s\\S]*?" + String.fromCharCode(0xe201),
+  "g"
+);
+const stripCitations = (s) => s.replace(CITE_TOKEN, "").replace(/【[^】]*】/g, "");
 const stripDirectives = (s) =>
   s.replace(/:::[A-Za-z][\w-]*(?:\{[^}]*\})?/g, "").replace(/^[ \t]*:::[ \t]*$/gm, "");
 const isImagePart = (p) => p && p.content_type === "image_asset_pointer";

@@ -59,7 +59,15 @@ async function pageExport(raw, withImages) {
   }
   path.reverse();
 
-  const stripCitations = (s) => s.replace(/【[^】]*】/g, "");
+  // Web-search citations come wrapped in private-use delimiters, e.g.
+  // <U+E200>cite<U+E202>turn0search1<U+E202>…<U+E201>. Build the regex from char
+  // codes so the source stays plain ASCII (no invisible characters). Also strip
+  // the older 【…】 bracket form.
+  const CITE_TOKEN = new RegExp(
+    String.fromCharCode(0xe200) + "[\\s\\S]*?" + String.fromCharCode(0xe201),
+    "g"
+  );
+  const stripCitations = (s) => s.replace(CITE_TOKEN, "").replace(/【[^】]*】/g, "");
   const stripDirectives = (s) =>
     s.replace(/:::[A-Za-z][\w-]*(?:\{[^}]*\})?/g, "").replace(/^[ \t]*:::[ \t]*$/gm, "");
 
