@@ -52,8 +52,8 @@ async function saveViaNative(filename, text, dir) {
 
 // Native handler downloads `url` (no CORS, unlike a content-script fetch) and
 // writes it to ~/Downloads/[dir/]filename.
-async function downloadViaNative(url, filename, dir) {
-  const resp = await browser.runtime.sendNativeMessage(NATIVE_APP, { action: "download", url, filename, dir });
+async function downloadViaNative(url, filename, dir, token) {
+  const resp = await browser.runtime.sendNativeMessage(NATIVE_APP, { action: "download", url, filename, dir, token });
   if (!resp || !resp.ok) throw new Error((resp && resp.error) || "image download failed");
   return resp.path;
 }
@@ -85,7 +85,7 @@ async function exportFolder(result) {
     showProgress(images.length);
     for (let i = 0; i < images.length; i++) {
       try {
-        await downloadViaNative(images[i].url, `images/${images[i].name}`, folder);
+        await downloadViaNative(images[i].url, `images/${images[i].name}`, folder, result.token);
         ok++;
       } catch (e) {
         failed++;

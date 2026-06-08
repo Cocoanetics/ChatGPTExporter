@@ -135,14 +135,22 @@ async function pageExport(raw, withImages) {
         try {
           const r = await fetch(ep, { headers: { Authorization: `Bearer ${accessToken}` } });
           if (!r.ok) continue;
-          const j = await r.json();
-          const url = j.download_url || (j.metadata && j.metadata.download_url);
-          if (url) {
-            return {
-              url,
-              mime: (j.metadata && j.metadata.mime_type) || j.mime_type || null,
-              name: (j.metadata && j.metadata.file_name) || j.file_name || null,
-            };
+          const ct = r.headers.get("content-type") || "";
+          if (ct.includes("application/json")) {
+            const j = await r.json();
+            const url = j.download_url || (j.metadata && j.metadata.download_url);
+            if (url) {
+              return {
+                url,
+                mime: (j.metadata && j.metadata.mime_type) || j.mime_type || null,
+                name: (j.metadata && j.metadata.file_name) || j.file_name || null,
+              };
+            }
+          } else if (r.redirected || ct.startsWith("image/")) {
+            // The endpoint redirected to (or streamed) the signed content URL,
+            // e.g. /backend-api/estuary/content?...&sig=... — r.url is that final
+            // URL. The native side re-fetches it (with the bearer token).
+            return { url: r.url, mime: ct.startsWith("image/") ? ct : null, name: null };
           }
         } catch (e) {
           // try the next shape
@@ -176,6 +184,9 @@ async function pageExport(raw, withImages) {
       );
     result.turns = turns.map((t) => ({ id: t.id, role: t.role, md: sub(t.md) }));
     result.images = images;
+    // The native side needs the bearer token to fetch the (backend-api) signed
+    // content URLs. Stays within the extension's own components.
+    result.token = accessToken;
   }
 
   if (raw) result.raw = JSON.stringify(convo, null, 2);

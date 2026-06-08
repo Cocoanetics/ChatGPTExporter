@@ -53,7 +53,8 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                   let filename = dict["filename"] as? String else {
                 return completion(["ok": false, "error": "Missing url or filename."])
             }
-            download(from: url, filename: filename, dir: dict["dir"] as? String, completion: completion)
+            download(from: url, filename: filename, dir: dict["dir"] as? String,
+                     token: dict["token"] as? String, completion: completion)
         case "ping":
             completion(["ok": true, "pong": true])
         default:
@@ -96,12 +97,16 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
     }
 
-    private static func download(from url: URL, filename: String, dir: String?,
+    private static func download(from url: URL, filename: String, dir: String?, token: String?,
                                  completion: @escaping ([String: Any]) -> Void) {
         guard let dest = destination(filename: filename, dir: dir, unique: false) else {
             return completion(["ok": false, "error": "Could not resolve the Downloads path."])
         }
-        let task = URLSession.shared.downloadTask(with: url) { tempURL, response, error in
+        var request = URLRequest(url: url)
+        if let token = token, !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let task = URLSession.shared.downloadTask(with: request) { tempURL, response, error in
             if let error = error {
                 return completion(["ok": false, "error": error.localizedDescription])
             }
