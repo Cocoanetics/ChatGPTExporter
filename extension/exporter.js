@@ -91,6 +91,27 @@ async function pageExport(raw, withFiles, footnotes) {
 
   const pendingFiles = [];
   const attMeta = {}; // fileId -> { name, mime }
+  const sandboxFiles = []; // code-interpreter files: { url, name }
+  const sandboxByPath = {}; // sandbox path -> local filename
+
+  // Code-interpreter files are linked as [text](sandbox:/mnt/data/<name>). The
+  // live interpreter/download endpoint serves them (bearer-authenticated, like
+  // image files); the sandbox is ephemeral, so old chats may 404.
+  const collectSandbox = (text, msgId) => {
+    for (const mm of text.matchAll(/sandbox:(\/[^\s)]+)/g)) {
+      const sandboxPath = mm[1];
+      if (sandboxByPath[sandboxPath]) continue;
+      const name = (sandboxPath.split("/").pop() || "file").replace(/[\\/:*?"<>|]+/g, "_");
+      sandboxByPath[sandboxPath] = name;
+      sandboxFiles.push({
+        name,
+        url:
+          `${location.origin}/backend-api/conversation/${encodeURIComponent(convId)}` +
+          `/interpreter/download?message_id=${encodeURIComponent(msgId)}` +
+          `&sandbox_path=${encodeURIComponent(sandboxPath)}`,
+      });
+    }
+  };
 
   // Image parts emit an ASCII sentinel (substituted before return). Non-image
   // attachments are handled separately (fileMarks).
@@ -165,6 +186,7 @@ async function pageExport(raw, withFiles, footnotes) {
 
     const text = (renderText(msg) + fileMarks(msg)).trim();
     if (!text) continue;
+    if (withFiles) collectSandbox(text, msg.id);
     turns.push({ id, role, md: `## ${speaker}\n\n${text}\n` });
   }
 
@@ -224,6 +246,9 @@ async function pageExport(raw, withFiles, footnotes) {
       nameByFile[fid] = name;
       files.push({ fileId: fid, url: resolved.url, name });
     }
+    for (const sf of sandboxFiles) {
+      files.push({ fileId: sf.name, url: sf.url, name: sf.name });
+    }
 
     const sub = (md) =>
       md
@@ -234,7 +259,10 @@ async function pageExport(raw, withFiles, footnotes) {
           const local = nameByFile[fid];
           const orig = (attMeta[fid] && attMeta[fid].name) || local || "file";
           return local ? `📎 [${orig}](files/${local})` : `📎 ${orig} _(unavailable)_`;
-        });
+        })
+        .replace(/sandbox:(\/[^\s)]+)/g, (m0, p) =>
+          sandboxByPath[p] ? `files/${sandboxByPath[p]}` : m0
+        );
     result.turns = turns.map((t) => ({ id: t.id, role: t.role, md: sub(t.md) }));
     result.files = files;
     result.token = accessToken;

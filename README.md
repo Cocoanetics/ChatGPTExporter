@@ -81,9 +81,11 @@ showed each source chip, plus a `[^n]: [Title](url)` block at the end
 
 **Download Files:** tick **"Download Files"** and click Download — instead of a
 lone `.md`, you get a folder `~/Downloads/<Title>-<ts>/` with `conversation.md`
-plus a `files/` folder of the conversation's **images and attachments (PDFs, …)**.
-Images are inlined as `![](files/…)`, other files as `📎 [name](files/…)` links;
-the native handler fetches each one directly (no CORS) with a progress bar.
+plus a `files/` folder of the conversation's **images, attachments (PDFs, …), and
+code-interpreter–generated files** (`sandbox:` links). Images are inlined as
+`![](files/…)`, other files as `📎 [name](files/…)` links; the native handler
+fetches each one directly (no CORS) with a progress bar. Sandbox files are
+ephemeral on ChatGPT's side, so very old chats may no longer have them.
 
 **Raw JSON:** hold **⌥ Option** while clicking Download or Copy — both switch to
 the raw `/backend-api/conversation` response (`…-raw.json`), the full mapping tree
