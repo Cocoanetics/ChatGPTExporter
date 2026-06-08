@@ -18,7 +18,7 @@
 // The popup diffs them against the per-conversation watermark in extension
 // storage and emits only what is new.
 
-async function pageExport() {
+async function pageExport(debug) {
   const convId = location.pathname.split("/").filter(Boolean).pop();
   if (!convId) {
     return { error: "No conversation is open. Open a chat first, then export." };
@@ -67,6 +67,13 @@ async function pageExport() {
   //    mostly stitching: drop the U+3010..U+3011 inline citation markers and
   //    placeholder images (their bytes live behind authenticated URLs).
   const stripCitations = (s) => s.replace(/【[^】]*】/g, "");
+  // ChatGPT sometimes wraps text in remark-style container directives, e.g.
+  // :::writing{variant="chat_message" id="84731"} … :::  — strip the markers and
+  // keep the inner text. Straight or curly quotes inside the braces are fine.
+  const stripDirectives = (s) =>
+    s
+      .replace(/:::[A-Za-z][\w-]*(?:\{[^}]*\})?/g, "") // opening, e.g. :::writing{...}
+      .replace(/^[ \t]*:::[ \t]*$/gm, ""); // closing ::: on its own line
   const textOf = (m) => {
     const parts = (m.content && m.content.parts) || [];
     const rendered = parts.map((p) =>
@@ -76,7 +83,10 @@ async function pageExport() {
         ? "_[image omitted]_"
         : ""
     );
-    return stripCitations(rendered.join("\n\n")).trim();
+    return stripDirectives(stripCitations(rendered.join("\n\n")))
+      .replace(/[ \t]+\n/g, "\n") // trailing spaces left by removed markers
+      .replace(/\n{3,}/g, "\n\n") // collapse blank-line runs
+      .trim();
   };
 
   const turns = [];
@@ -90,9 +100,14 @@ async function pageExport() {
     turns.push({ id, role, md: `## ${heading}\n\n${text}\n` });
   }
 
-  return {
+  const result = {
     convId,
     title: convo.title || "ChatGPT conversation",
     turns,
   };
+  // Debug mode also returns the full raw conversation JSON — the whole mapping
+  // tree with every content_type and metadata field — so cleanup rules can be
+  // tuned against ground truth.
+  if (debug) result.raw = JSON.stringify(convo, null, 2);
+  return result;
 }

@@ -8,6 +8,7 @@
 const statusEl = document.getElementById("status");
 const exportBtn = document.getElementById("export");
 const fullToggle = document.getElementById("full");
+const debugToggle = document.getElementById("debug");
 
 const storeKey = (convId) => `wikiExport:${convId}`;
 
@@ -21,15 +22,23 @@ async function getActiveTab() {
   return tab;
 }
 
-// Save text as a .md file by clicking a transient anchor in the popup document.
-// Reliable across Safari versions and needs no `downloads` permission.
-function downloadMarkdown(filename, text) {
-  const url = URL.createObjectURL(new Blob([text], { type: "text/markdown" }));
-  const a = Object.assign(document.createElement("a"), { href: url, download: filename });
+// Save via an anchor click in the popup, during the button's user gesture: that
+// gesture is what makes Safari honor the `download` filename. (A programmatic
+// click from the page has no gesture, so Safari ignores the name and saves the
+// file as "Unknown" with no extension.) application/octet-stream forces a real
+// download instead of an inline preview; the bytes are UTF-8, so umlauts and
+// emoji stay intact. Trade-off: from the popup, Safari's one-time download
+// prompt shows a blank "" source — just click Allow. (A page-initiated save
+// would label the source "chatgpt.com" but then drop the filename.)
+function saveFile(filename, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: "application/octet-stream" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 function timestamp() {
@@ -52,12 +61,15 @@ exportBtn.addEventListener("click", async () => {
       return;
     }
 
+    const debug = debugToggle.checked;
+
     // Run the exporter inside the page (carries the session cookies).
     let injection;
     try {
       [injection] = await browser.scripting.executeScript({
         target: { tabId: tab.id },
         func: pageExport,
+        args: [debug],
       });
     } catch (e) {
       setStatus("Couldn't reach the page. Open a ChatGPT chat and try again.", "err");
@@ -71,6 +83,17 @@ exportBtn.addEventListener("click", async () => {
     }
     if (result.error) {
       setStatus(result.error, "err");
+      return;
+    }
+
+    if (debug) {
+      // Dump the full raw conversation JSON for tuning the cleanup rules.
+      // Inspection, not a real export — leave the watermark untouched.
+      saveFile(`${safeName(result.title)}-${timestamp()}-raw.json`, result.raw || "{}");
+      setStatus(
+        `✓ Saved raw JSON (${Math.round((result.raw || "").length / 1024)} KB). Tune cleanup, then re-run with Debug off.`,
+        "ok"
+      );
       return;
     }
 
@@ -90,20 +113,24 @@ exportBtn.addEventListener("click", async () => {
     let markdown = fresh.map((t) => t.md).join("\n");
     if (firstRun) markdown = `# ${result.title}\n\n${markdown}`; // title only on the first pull
 
-    downloadMarkdown(`${safeName(result.title)}-${timestamp()}.md`, markdown);
+    // Clipboard first (the primary path for pasting into a wiki), then the file.
     let copied = true;
     try {
       await navigator.clipboard.writeText(markdown);
     } catch (e) {
       copied = false;
     }
+    saveFile(`${safeName(result.title)}-${timestamp()}.md`, markdown);
 
     // Advance the watermark.
     const merged = Array.from(new Set([...seen, ...fresh.map((t) => t.id)]));
     await browser.storage.local.set({ [key]: { exported: merged, updated: Date.now() } });
 
-    const scope = firstRun ? "whole chat" : `${fresh.length} new message${fresh.length === 1 ? "" : "s"}`;
-    setStatus(`✓ Exported ${scope}. Saved as .md${copied ? " and copied to clipboard" : ""}.`, "ok");
+    const scope = firstRun ? "the whole chat" : `${fresh.length} new message${fresh.length === 1 ? "" : "s"}`;
+    setStatus(
+      `✓ Exported ${scope}.${copied ? " Copied to clipboard;" : ""} saved a .md to Downloads.`,
+      "ok"
+    );
   } catch (e) {
     setStatus("Error: " + (e && e.message ? e.message : String(e)), "err");
   } finally {

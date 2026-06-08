@@ -15,6 +15,11 @@
     Re-export the whole chat (ignore what was pulled before)
   </label>
 
+  <label class="row">
+    <input type="checkbox" id="debug">
+    Debug: save raw conversation JSON (to tune cleanup)
+  </label>
+
   <p id="status" class="muted">Open a ChatGPT conversation, then click Export.</p>
 
   <!-- exporter.js defines pageExport(); it is injected into the page by popup.js -->
