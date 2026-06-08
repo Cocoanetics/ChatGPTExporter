@@ -127,9 +127,11 @@ async function pageExport(raw, withImages) {
     // Try both known download-endpoint shapes; the pre-signed download_url then
     // needs no auth (the native side fetches it).
     const resolveURL = async (fid) => {
+      // The gist's verbatim flow: files/download/{id} returns JSON
+      // { download_url, file_name, status }. Keep the alternate shape as a fallback.
       const endpoints = [
-        `/backend-api/files/${encodeURIComponent(fid)}/download`,
         `/backend-api/files/download/${encodeURIComponent(fid)}`,
+        `/backend-api/files/${encodeURIComponent(fid)}/download`,
       ];
       for (const ep of endpoints) {
         try {
