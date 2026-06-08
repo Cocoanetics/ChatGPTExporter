@@ -1,22 +1,19 @@
 // popup.js
 //
-// Drives the toolbar popup: injects pageExport() into the active ChatGPT tab,
-// diffs the returned turns against this conversation's watermark, and delivers
-// the new Markdown to the clipboard or to ~/Downloads via the native handler.
-// "Download images" instead snapshots the whole conversation into a folder
-// (conversation.md + images/), the native side fetching each picture (no CORS).
-// Safari exposes the promise-based `browser.*` namespace.
+// Toolbar popup: injects pageExport() into the active ChatGPT tab and delivers
+// the whole conversation as Markdown — to the clipboard or to ~/Downloads via
+// the native handler. "Download Files" instead snapshots into a folder
+// (conversation.md + files/), the native side fetching each image/attachment.
+// Web-search citations always become footnotes. Safari exposes the promise-based
+// `browser.*` namespace.
 
 const statusEl = document.getElementById("status");
 const downloadBtn = document.getElementById("download");
 const copyBtn = document.getElementById("copy");
-const fullToggle = document.getElementById("full");
-const imagesToggle = document.getElementById("images");
-const footnotesToggle = document.getElementById("footnotes");
+const filesToggle = document.getElementById("files");
 const progressEl = document.getElementById("progress");
 
 const NATIVE_APP = "com.drobnik.chatgptexporter";
-const storeKey = (convId) => `wikiExport:${convId}`;
 
 function setStatus(message, kind = "") {
   statusEl.textContent = message;
@@ -43,19 +40,17 @@ async function getActiveTab() {
   return tab;
 }
 
-// Native handler writes a UTF-8 text file to ~/Downloads/[dir/]filename and
-// returns its absolute path — no browser download, so no prompt or "Unknown".
+// Native handler writes a UTF-8 text file to ~/Downloads/[dir/]filename.
 async function saveViaNative(filename, text, dir) {
   const resp = await browser.runtime.sendNativeMessage(NATIVE_APP, { action: "save", filename, text, dir });
   if (!resp || !resp.ok) throw new Error((resp && resp.error) || "native save failed");
   return resp.path;
 }
 
-// Native handler downloads `url` (no CORS, unlike a content-script fetch) and
-// writes it to ~/Downloads/[dir/]filename.
+// Native handler fetches `url` (with the bearer token) and writes it.
 async function downloadViaNative(url, filename, dir, token) {
   const resp = await browser.runtime.sendNativeMessage(NATIVE_APP, { action: "download", url, filename, dir, token });
-  if (!resp || !resp.ok) throw new Error((resp && resp.error) || "image download failed");
+  if (!resp || !resp.ok) throw new Error((resp && resp.error) || "file download failed");
   return resp.path;
 }
 
@@ -66,7 +61,7 @@ function safeName(title) {
   return title.replace(/[\\/:*?"<>|]+/g, "_").trim().slice(0, 80) || "chatgpt";
 }
 
-// Append GFM footnote definitions for the citations actually referenced in `md`.
+// Append GFM footnote definitions for the citations referenced in `md`.
 function appendFootnotes(md, notes) {
   if (!notes || !notes.length) return md;
   const used = new Set([...md.matchAll(/\[\^(\d+)\]/g)].map((m) => Number(m[1])));
@@ -76,28 +71,29 @@ function appendFootnotes(md, notes) {
   return defs.length ? `${md}\n${defs.join("\n")}\n` : md;
 }
 
-// Whole-conversation snapshot into ~/Downloads/<Title-ts>/: conversation.md plus
-// an images/ folder. Not incremental and leaves the watermark untouched.
+function buildMarkdown(result) {
+  const md = `# ${result.title}\n\n` + result.turns.map((t) => t.md).join("\n");
+  return appendFootnotes(md, result.footnotes);
+}
+
+// Whole-conversation snapshot into ~/Downloads/<Title-ts>/: conversation.md + files/.
 async function exportFolder(result) {
   const folder = `${safeName(result.title)}-${timestamp()}`;
-  let md = `# ${result.title}\n\n` + result.turns.map((t) => t.md).join("\n");
-  md = appendFootnotes(md, result.footnotes);
-
   try {
-    await saveViaNative("conversation.md", md, folder);
+    await saveViaNative("conversation.md", buildMarkdown(result), folder);
   } catch (e) {
     setStatus("Save failed: " + (e && e.message ? e.message : e), "err");
     return;
   }
 
-  const images = result.images || [];
+  const files = result.files || [];
   let ok = 0;
   let failed = 0;
-  if (images.length) {
-    showProgress(images.length);
-    for (let i = 0; i < images.length; i++) {
+  if (files.length) {
+    showProgress(files.length);
+    for (let i = 0; i < files.length; i++) {
       try {
-        await downloadViaNative(images[i].url, `images/${images[i].name}`, folder, result.token);
+        await downloadViaNative(files[i].url, `files/${files[i].name}`, folder, result.token);
         ok++;
       } catch (e) {
         failed++;
@@ -107,9 +103,9 @@ async function exportFolder(result) {
     hideProgress();
   }
 
-  const note = images.length
-    ? `, ${ok}/${images.length} image${images.length === 1 ? "" : "s"}${failed ? ` (${failed} failed)` : ""}`
-    : ", no images";
+  const note = files.length
+    ? `, ${ok}/${files.length} file${files.length === 1 ? "" : "s"}${failed ? ` (${failed} failed)` : ""}`
+    : ", no files";
   setStatus(`✓ Saved ${folder}/ to Downloads — ${result.turns.length} turns${note}.`, "ok");
 }
 
@@ -124,15 +120,15 @@ async function runExport(mode, raw) {
       return;
     }
 
-    const withImages = mode === "download" && !raw && imagesToggle.checked;
-    const wantFootnotes = !raw && footnotesToggle.checked;
+    const withFiles = mode === "download" && !raw && filesToggle.checked;
+    const footnotes = !raw; // citations -> footnotes always (except raw JSON)
 
     let injection;
     try {
       [injection] = await browser.scripting.executeScript({
         target: { tabId: tab.id },
         func: pageExport,
-        args: [raw, withImages, wantFootnotes],
+        args: [raw, withFiles, footnotes],
       });
     } catch (e) {
       setStatus("Couldn't reach the page. Open a ChatGPT chat and try again.", "err");
@@ -149,7 +145,7 @@ async function runExport(mode, raw) {
       return;
     }
 
-    // ⌥: raw conversation JSON to a single file (ignores the watermark).
+    // ⌥: raw conversation JSON to a single file.
     if (raw) {
       const content = result.raw || "{}";
       const path = await saveViaNative(`${safeName(result.title)}-${timestamp()}-raw.json`, content);
@@ -157,30 +153,14 @@ async function runExport(mode, raw) {
       return;
     }
 
-    // "Download images": whole-conversation folder snapshot (ignores the watermark).
-    if (withImages) {
+    // Download Files: whole-conversation folder snapshot.
+    if (withFiles) {
       await exportFolder(result);
       return;
     }
 
-    // Default: incremental Markdown to the clipboard or a single .md.
-    const key = storeKey(result.convId);
-    const stored = fullToggle.checked ? null : (await browser.storage.local.get(key))[key];
-    const seen = new Set((stored && stored.exported) || []);
-    const firstRun = seen.size === 0;
-
-    const fresh = result.turns.filter((t) => !seen.has(t.id));
-    if (fresh.length === 0) {
-      setStatus("✓ Up to date — no new messages since the last pull.", "ok");
-      return;
-    }
-
-    let md = fresh.map((t) => t.md).join("\n");
-    if (firstRun) md = `# ${result.title}\n\n${md}`;
-    md = appendFootnotes(md, result.footnotes);
-    const label = firstRun ? "the whole chat" : `${fresh.length} new message${fresh.length === 1 ? "" : "s"}`;
-    const advanceIds = Array.from(new Set([...seen, ...fresh.map((t) => t.id)]));
-
+    // Default: the whole chat as Markdown, to the clipboard or a single .md.
+    const md = buildMarkdown(result);
     if (mode === "copy") {
       try {
         await navigator.clipboard.writeText(md);
@@ -188,8 +168,7 @@ async function runExport(mode, raw) {
         setStatus("Copy failed: " + (e && e.message ? e.message : e), "err");
         return;
       }
-      await browser.storage.local.set({ [key]: { exported: advanceIds, updated: Date.now() } });
-      setStatus(`✓ Copied ${label} to the clipboard.`, "ok");
+      setStatus("✓ Copied the chat to the clipboard.", "ok");
     } else {
       let path;
       try {
@@ -198,8 +177,7 @@ async function runExport(mode, raw) {
         setStatus("Save failed: " + (e && e.message ? e.message : e), "err");
         return;
       }
-      await browser.storage.local.set({ [key]: { exported: advanceIds, updated: Date.now() } });
-      setStatus(`✓ Saved ${label} → ${path.split("/").pop()} in Downloads.`, "ok");
+      setStatus(`✓ Saved ${path.split("/").pop()} to Downloads.`, "ok");
     }
   } catch (e) {
     setStatus("Error: " + (e && e.message ? e.message : String(e)), "err");
@@ -212,11 +190,9 @@ async function runExport(mode, raw) {
 downloadBtn.addEventListener("click", (e) => runExport("download", e.altKey));
 copyBtn.addEventListener("click", (e) => runExport("copy", e.altKey));
 
-// Holding Option (Alt) switches both buttons to the raw-JSON variant, with a
-// live label. The handlers read e.altKey, so behavior is right even if the popup
-// opened with Option already held.
+// Holding Option (Alt) switches both buttons to the raw-JSON variant.
 function setAltLabels(alt) {
-  downloadBtn.textContent = alt ? "Download JSON" : "Download .md";
+  downloadBtn.textContent = alt ? "Download JSON" : "Download";
   copyBtn.textContent = alt ? "Copy JSON" : "Copy";
 }
 const syncAlt = (e) => setAltLabels(e.altKey);

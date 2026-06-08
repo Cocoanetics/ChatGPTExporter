@@ -3,23 +3,23 @@
 // `pageExport` runs INSIDE the chatgpt.com page (injected by popup.js via
 // browser.scripting.executeScript). Because it executes in the page's origin,
 // its same-origin fetches carry the logged-in session cookies — so it can read
-// /api/auth/session, /backend-api/conversation/{id}, and (for images) the file
-// download endpoints exactly like the page itself.
+// /api/auth/session, /backend-api/conversation/{id}, and the file download
+// endpoints exactly like the page itself.
 //
 // It must be fully self-contained: executeScript serializes this function's
 // source and runs it in the page, so it cannot reference anything in the
 // popup's scope. It returns a plain (structurally cloneable) object.
 //
 // Returned shape:
-//   { convId, title, turns: [{ id, role, md }], images?, raw? }   on success
-//   { error: "..." }                                              on failure
+//   { convId, title, turns: [{ id, role, md }], files?, footnotes?, token?, raw? }
+//   { error: "..." }   on failure
 //
-// `raw` (Option-click) attaches the full conversation JSON. `withImages`
-// resolves every image to a pre-signed URL, returns them as
-// `images: [{ fileId, url, name }]`, and rewrites the image placeholders to
-// `images/<name>` links so a folder export resolves.
+// `raw` (Option-click) attaches the full conversation JSON. `withFiles` resolves
+// every image and attachment (PDFs, …) to a pre-signed URL, returns them as
+// `files: [{ fileId, url, name }]`, and rewrites placeholders to files/<name>
+// links. `footnotes` converts web-search citations to GFM footnotes.
 
-async function pageExport(raw, withImages, footnotes) {
+async function pageExport(raw, withFiles, footnotes) {
   const convId = location.pathname.split("/").filter(Boolean).pop();
   if (!convId) {
     return { error: "No conversation is open. Open a chat first, then export." };
@@ -59,10 +59,9 @@ async function pageExport(raw, withImages, footnotes) {
   }
   path.reverse();
 
-  // Web-search citations come wrapped in private-use delimiters, e.g.
+  // Web-search citations are wrapped in private-use delimiters, e.g.
   // <U+E200>cite<U+E202>turn0search1<U+E202>…<U+E201>. Build the regex from char
-  // codes so the source stays plain ASCII (no invisible characters). Also strip
-  // the older 【…】 bracket form.
+  // codes so the source stays plain ASCII. Also strip the older 【…】 form.
   const CITE_TOKEN = new RegExp(
     String.fromCharCode(0xe200) + "[\\s\\S]*?" + String.fromCharCode(0xe201),
     "g"
@@ -71,7 +70,6 @@ async function pageExport(raw, withImages, footnotes) {
   const stripDirectives = (s) =>
     s.replace(/:::[A-Za-z][\w-]*(?:\{[^}]*\})?/g, "").replace(/^[ \t]*:::[ \t]*$/gm, "");
 
-  // file-service://file_XYZ / sediment://file_XYZ -> file_XYZ
   const fileIdOf = (ptr) => {
     const s = typeof ptr === "string" ? ptr : "";
     const m = s.match(/^(?:file-service|sediment):\/\/(.+)$/);
@@ -91,9 +89,11 @@ async function pageExport(raw, withImages, footnotes) {
     return noteByUrl.get(url);
   };
 
-  // With images, image parts emit an ASCII sentinel (substituted before return)
-  // instead of the text marker.
   const pendingFiles = [];
+  const attMeta = {}; // fileId -> { name, mime }
+
+  // Image parts emit an ASCII sentinel (substituted before return). Non-image
+  // attachments are handled separately (fileMarks).
   const rawTextOf = (m) => {
     const parts = (m.content && m.content.parts) || [];
     return parts
@@ -101,7 +101,7 @@ async function pageExport(raw, withImages, footnotes) {
         if (typeof p === "string") return p;
         if (isImagePart(p)) {
           const fid = fileIdOf(p.asset_pointer);
-          if (withImages && fid) {
+          if (withFiles && fid) {
             pendingFiles.push(fid);
             return `@@IMG@@${fid}@@`;
           }
@@ -115,8 +115,7 @@ async function pageExport(raw, withImages, footnotes) {
     stripDirectives(stripCitations(s)).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 
   // With footnotes, splice [^n] markers in at each grouped_webpages citation
-  // (highest index first so earlier offsets stay valid), then clean the leftover
-  // (non-web) tokens.
+  // (highest index first so earlier offsets stay valid), then clean.
   const renderText = (m) => {
     let raw = rawTextOf(m);
     if (footnotes) {
@@ -134,28 +133,37 @@ async function pageExport(raw, withImages, footnotes) {
     return clean(raw);
   };
 
-  // file id -> { name, mime } harvested from message attachments (uploads).
-  const attMeta = {};
+  // Non-image attachments (PDFs, docs, …) live only in metadata.attachments —
+  // append a placeholder link per file (images come from image_asset_pointer
+  // parts instead).
+  const fileMarks = (m) => {
+    if (!withFiles) return "";
+    const out = [];
+    for (const a of (m.metadata && m.metadata.attachments) || []) {
+      if (!a || !a.id || (a.mime_type || "").startsWith("image/")) continue;
+      pendingFiles.push(a.id);
+      out.push(`@@FILE@@${a.id}@@`);
+    }
+    return out.length ? "\n\n" + out.join("\n\n") : "";
+  };
 
   const turns = [];
   for (const { id, msg } of path) {
     if (msg.metadata && msg.metadata.is_visually_hidden_from_conversation) continue;
-    // Drop internal tool-call traffic (image-gen request JSON, the DALL·E
-    // prompt, etc.) — those are addressed to a tool, not "all".
     if (msg.recipient && msg.recipient !== "all") continue;
 
     const role = msg.author && msg.author.role;
     let speaker;
     if (role === "user") speaker = "User";
     else if (role === "assistant") speaker = "ChatGPT";
-    else if (role === "tool" && hasImage(msg)) speaker = "ChatGPT"; // generated images
-    else continue; // system, or non-image tool output
+    else if (role === "tool" && hasImage(msg)) speaker = "ChatGPT";
+    else continue;
 
     for (const a of (msg.metadata && msg.metadata.attachments) || []) {
       if (a && a.id) attMeta[a.id] = { name: a.name, mime: a.mime_type };
     }
 
-    const text = renderText(msg);
+    const text = (renderText(msg) + fileMarks(msg)).trim();
     if (!text) continue;
     turns.push({ id, role, md: `## ${speaker}\n\n${text}\n` });
   }
@@ -163,12 +171,10 @@ async function pageExport(raw, withImages, footnotes) {
   const result = { convId, title: convo.title || "ChatGPT conversation", turns };
   if (footnotes) result.footnotes = notes;
 
-  if (withImages) {
-    // Try both known download-endpoint shapes; the pre-signed download_url then
-    // needs no auth (the native side fetches it).
+  if (withFiles) {
+    // The files endpoint returns JSON { download_url, file_name } or redirects
+    // to the signed content URL; the native side re-fetches it with the token.
     const resolveURL = async (fid) => {
-      // The gist's verbatim flow: files/download/{id} returns JSON
-      // { download_url, file_name, status }. Keep the alternate shape as a fallback.
       const endpoints = [
         `/backend-api/files/download/${encodeURIComponent(fid)}`,
         `/backend-api/files/${encodeURIComponent(fid)}/download`,
@@ -188,11 +194,8 @@ async function pageExport(raw, withImages, footnotes) {
                 name: (j.metadata && j.metadata.file_name) || j.file_name || null,
               };
             }
-          } else if (r.redirected || ct.startsWith("image/")) {
-            // The endpoint redirected to (or streamed) the signed content URL,
-            // e.g. /backend-api/estuary/content?...&sig=... — r.url is that final
-            // URL. The native side re-fetches it (with the bearer token).
-            return { url: r.url, mime: ct.startsWith("image/") ? ct : null, name: null };
+          } else if (r.redirected || !ct.includes("text/html")) {
+            return { url: r.url, mime: ct || null, name: null };
           }
         } catch (e) {
           // try the next shape
@@ -201,33 +204,39 @@ async function pageExport(raw, withImages, footnotes) {
       return null;
     };
 
-    const images = [];
+    const files = [];
     const nameByFile = {};
     for (const fid of new Set(pendingFiles)) {
       const resolved = await resolveURL(fid);
       if (!resolved) continue;
       const meta = attMeta[fid] || {};
       const nameHint = resolved.name || meta.name;
-      const mime = resolved.mime || meta.mime;
+      const mime = resolved.mime || meta.mime || "";
       const ext =
         (nameHint && (nameHint.match(/\.[A-Za-z0-9]+$/) || [])[0]) ||
-        (mime && /jpe?g/.test(mime) ? ".jpg"
-          : mime && /webp/.test(mime) ? ".webp"
-          : mime && /gif/.test(mime) ? ".gif"
-          : ".png");
+        (/jpe?g/.test(mime) ? ".jpg"
+          : /webp/.test(mime) ? ".webp"
+          : /gif/.test(mime) ? ".gif"
+          : /pdf/.test(mime) ? ".pdf"
+          : /png|image/.test(mime) ? ".png"
+          : ".bin");
       const name = `${fid}${ext}`;
       nameByFile[fid] = name;
-      images.push({ fileId: fid, url: resolved.url, name });
+      files.push({ fileId: fid, url: resolved.url, name });
     }
 
     const sub = (md) =>
-      md.replace(/@@IMG@@([^@]+)@@/g, (_, fid) =>
-        nameByFile[fid] ? `![image](images/${nameByFile[fid]})` : "_[image omitted]_"
-      );
+      md
+        .replace(/@@IMG@@([^@]+)@@/g, (_, fid) =>
+          nameByFile[fid] ? `![image](files/${nameByFile[fid]})` : "_[image omitted]_"
+        )
+        .replace(/@@FILE@@([^@]+)@@/g, (_, fid) => {
+          const local = nameByFile[fid];
+          const orig = (attMeta[fid] && attMeta[fid].name) || local || "file";
+          return local ? `📎 [${orig}](files/${local})` : `📎 ${orig} _(unavailable)_`;
+        });
     result.turns = turns.map((t) => ({ id: t.id, role: t.role, md: sub(t.md) }));
-    result.images = images;
-    // The native side needs the bearer token to fetch the (backend-api) signed
-    // content URLs. Stays within the extension's own components.
+    result.files = files;
     result.token = accessToken;
   }
 

@@ -66,54 +66,38 @@ A 🟢 button appears in the toolbar.
 ## Usage
 
 1. Open the conversation in Safari (the account that owns the chat).
-2. Click **Download .md** to write the file, or **Copy** to put the Markdown on
-   the clipboard for pasting straight into your wiki.
-3. **Download** writes `Title-YYYY-MM-DD-HH-MM.md` to your **Downloads** folder.
-   The native handler writes it directly — so there's **no download prompt**, the
-   filename is exact, and the bytes are UTF-8 (umlauts and emoji intact).
+2. Click **Download** to write the whole chat as `Title-YYYY-MM-DD-HH-MM.md` to
+   your **Downloads** folder, or **Copy** to put the Markdown on the clipboard.
+   The native handler writes the file directly — no download prompt, exact
+   filename, UTF-8 (umlauts and emoji intact).
 
    > No save-location picker exists for Safari extensions, so the file always
-   > lands in Downloads with the exact name. Both actions are incremental and
-   > advance the watermark (below).
+   > lands in Downloads with the exact name.
 
-**Incremental pulls:** run it again later on the same chat and you get only the
-messages added since last time. If nothing's new, it says so and downloads
-nothing. The watermark lives in this Safari profile's extension storage, keyed
-by conversation id — so do your top-ups from the same Mac/profile.
+Web-search **citations always become footnotes**: an inline `[^n]` where ChatGPT
+showed each source chip, plus a `[^n]: [Title](url)` block at the end
+(deduplicated by URL, anchored references only). Other ChatGPT annotations
+(`:::` blocks, hidden tokens) are stripped.
 
-**Re-export everything:** tick **"Re-export the whole chat"** to ignore the
-watermark and dump the full conversation again (this also resets the watermark).
-
-**Download images:** tick **"Download images"** and click Download — instead of a
+**Download Files:** tick **"Download Files"** and click Download — instead of a
 lone `.md`, you get a folder `~/Downloads/<Title>-<ts>/` with `conversation.md`
-(image links rewritten to `images/…`) and an `images/` folder. The native handler
-fetches each picture directly (no CORS) with a progress bar. This is a
-whole-thread snapshot and doesn't touch the incremental watermark.
+plus a `files/` folder of the conversation's **images and attachments (PDFs, …)**.
+Images are inlined as `![](files/…)`, other files as `📎 [name](files/…)` links;
+the native handler fetches each one directly (no CORS) with a progress bar.
 
-**Sources as footnotes:** tick **"Sources as footnotes"** to convert web-search
-citations into GFM footnotes — an inline `[^n]` where ChatGPT showed each source
-chip, plus a `[^n]: [Title](url)` block at the end (deduplicated by URL, only the
-references actually cited). Off by default (citations are stripped) so
-strict-CommonMark wikis stay clean. Anchored references only — the extra
-"Sources panel" entries aren't included.
-
-**Raw JSON (tune the cleanup):** hold **⌥ Option** while clicking Download or
-Copy — both buttons switch to the raw `/backend-api/conversation` response
-(`…-raw.json`) instead of Markdown: the full mapping tree with every
-`content_type` and metadata field. Inspect it to spot new artifacts to strip
-(citations, `:::` directives, …), then refine the `stripCitations` /
-`stripDirectives` rules in `extension/exporter.js` (use `tools/render-md.mjs` to
-validate offline). The raw export ignores the watermark.
+**Raw JSON:** hold **⌥ Option** while clicking Download or Copy — both switch to
+the raw `/backend-api/conversation` response (`…-raw.json`), the full mapping tree
+with every `content_type` and metadata field. Handy for tuning the cleanup rules
+in `extension/exporter.js` (use `tools/render-md.mjs` to render one offline).
 
 ## Limitations
 
-- **Images** are `_[image omitted]_` in a plain `.md`; tick **Download images** to
-  snapshot the whole thread into a folder with the pictures fetched natively and
-  the links rewritten to `images/…`. The image-pointer parsing is defensive and
-  may need tuning per ChatGPT's current shapes (use ⌥ Download JSON to inspect).
-- **Edits/regenerations re-emit a tail.** If an earlier message is edited, every
-  message after it gets a new id and exports again as "new" — correct, since the
-  thread genuinely changed, but worth knowing. Pure appends give just the new turns.
+- **Images & attachments** are `_[image omitted]_` / omitted in a plain `.md`; tick
+  **Download Files** to snapshot the thread into a folder with images and files
+  (PDFs, …) fetched natively. The pointer/attachment parsing is defensive and may
+  need tuning per ChatGPT's current shapes (use ⌥ Download JSON to inspect).
+- The export always reflects the **current active path** — edited/regenerated
+  branches are followed to the visible leaf; abandoned variants are dropped.
 - **macOS only**, as generated. Re-run the converter with `--ios-only`/without
   `--macos-only` to add an iPad/iPhone target.
 - Hosts are `chatgpt.com` and `chat.openai.com`. Add others in
