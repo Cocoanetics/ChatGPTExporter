@@ -10,7 +10,6 @@ const statusEl = document.getElementById("status");
 const downloadBtn = document.getElementById("download");
 const copyBtn = document.getElementById("copy");
 const fullToggle = document.getElementById("full");
-const debugToggle = document.getElementById("debug");
 
 const storeKey = (convId) => `wikiExport:${convId}`;
 
@@ -57,9 +56,9 @@ function safeName(title) {
 // Shared pipeline for both actions. `mode` is "download" or "copy" — the only
 // difference is where the rendered content goes. Debug mode swaps the content
 // for the raw conversation JSON and leaves the watermark untouched.
-async function runExport(mode) {
+async function runExport(mode, raw) {
   setBusy(true);
-  setStatus(mode === "download" ? "Exporting…" : "Copying…");
+  setStatus((mode === "download" ? "Exporting" : "Copying") + (raw ? " raw JSON" : "") + "…");
 
   try {
     const tab = await getActiveTab();
@@ -68,14 +67,12 @@ async function runExport(mode) {
       return;
     }
 
-    const debug = debugToggle.checked;
-
     let injection;
     try {
       [injection] = await browser.scripting.executeScript({
         target: { tabId: tab.id },
         func: pageExport,
-        args: [debug],
+        args: [raw],
       });
     } catch (e) {
       setStatus("Couldn't reach the page. Open a ChatGPT chat and try again.", "err");
@@ -95,7 +92,7 @@ async function runExport(mode) {
     // Decide what to deliver and whether to advance the watermark.
     let content, filename, label;
     let advance = null;
-    if (debug) {
+    if (raw) {
       content = result.raw || "{}";
       filename = `${safeName(result.title)}-${timestamp()}-raw.json`;
       label = `raw JSON (${Math.round(content.length / 1024)} KB)`;
@@ -151,5 +148,18 @@ async function runExport(mode) {
   }
 }
 
-downloadBtn.addEventListener("click", () => runExport("download"));
-copyBtn.addEventListener("click", () => runExport("copy"));
+downloadBtn.addEventListener("click", (e) => runExport("download", e.altKey));
+copyBtn.addEventListener("click", (e) => runExport("copy", e.altKey));
+
+// Holding Option (Alt) switches both buttons to the raw-JSON variant, with a
+// live label so it's discoverable. The handlers read e.altKey directly, so the
+// behavior is correct even if the label hasn't repainted (e.g. popup opened with
+// Option already held).
+function setAltLabels(alt) {
+  downloadBtn.textContent = alt ? "Download JSON" : "Download .md";
+  copyBtn.textContent = alt ? "Copy JSON" : "Copy";
+}
+const syncAlt = (e) => setAltLabels(e.altKey);
+window.addEventListener("keydown", syncAlt);
+window.addEventListener("keyup", syncAlt);
+window.addEventListener("blur", () => setAltLabels(false));

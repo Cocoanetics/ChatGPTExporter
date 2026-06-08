@@ -84,13 +84,13 @@ by conversation id — so do your top-ups from the same Mac/profile.
 **Re-export everything:** tick **"Re-export the whole chat"** to ignore the
 watermark and dump the full conversation again (this also resets the watermark).
 
-**Debug (tune the cleanup):** tick **"Debug: raw conversation JSON"** — Download
-or Copy then gives you the raw `/backend-api/conversation` response (`…-raw.json`)
-instead of Markdown: the full mapping tree with every `content_type` and metadata
-field. Inspect it to spot new artifacts to strip (citations, `:::` directives, …),
-then refine the `stripCitations` / `stripDirectives` rules in
-`extension/exporter.js` (use `tools/render-md.mjs` to validate offline). Debug
-mode ignores the watermark.
+**Raw JSON (tune the cleanup):** hold **⌥ Option** while clicking Download or
+Copy — both buttons switch to the raw `/backend-api/conversation` response
+(`…-raw.json`) instead of Markdown: the full mapping tree with every
+`content_type` and metadata field. Inspect it to spot new artifacts to strip
+(citations, `:::` directives, …), then refine the `stripCitations` /
+`stripDirectives` rules in `extension/exporter.js` (use `tools/render-md.mjs` to
+validate offline). The raw export ignores the watermark.
 
 ## Limitations
 
