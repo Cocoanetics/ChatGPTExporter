@@ -1,0 +1,32 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (unsigned)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      # Compile the app target (which builds the Safari extension target as a
+      # dependency). Signing is disabled so the build needs no certificates or
+      # the maintainer's development team.
+      - name: Build app + extension (unsigned)
+        run: |
+          xcodebuild build \
+            -project "ChatGPT Exporter/ChatGPT Exporter.xcodeproj" \
+            -target "ChatGPT Exporter" \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM=""

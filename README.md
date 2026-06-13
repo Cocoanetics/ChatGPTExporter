@@ -1,8 +1,10 @@
-# ChatGPT → Wiki Exporter (Safari Web Extension)
+# ChatGPT Exporter (Safari Web Extension)
+
+[![Build](https://github.com/Cocoanetics/ChatGPTExporter/actions/workflows/build.yml/badge.svg)](https://github.com/Cocoanetics/ChatGPTExporter/actions/workflows/build.yml)
 
 A Safari toolbar button that exports the ChatGPT conversation you're currently
-viewing as **Markdown** — with **incremental top-ups** so you can re-run it on a
-growing chat and only get the new messages.
+viewing as **Markdown** — the whole chat, with web-search citations turned into
+footnotes and an optional snapshot of its images and files.
 
 It works by injecting a small function into the open `chatgpt.com` page, which
 calls ChatGPT's own `/backend-api/conversation/{id}` using the session you're
@@ -18,9 +20,9 @@ already logged into (no tokens, no passwords, nothing leaves your machine).
    regenerations), and renders each user/assistant turn. Assistant text is
    already Markdown, so this is mostly stitching + dropping the `【…】` citation
    markers.
-3. [`extension/popup.js`](extension/popup.js) diffs the turns against a
-   per-conversation **watermark** in `browser.storage.local`, then downloads a
-   `.md` of just the new turns and copies it to the clipboard.
+3. [`extension/popup.js`](extension/popup.js) stitches the turns into a single
+   Markdown document — web-search citations appended as footnotes — and either
+   saves it to `~/Downloads` via the native handler or copies it to the clipboard.
 
 ## Project layout
 
@@ -45,10 +47,15 @@ source of truth.
 
 1. Open `ChatGPT Exporter/ChatGPT Exporter.xcodeproj` in Xcode.
 2. Signing is **already configured** — automatic style, team **`Z7L2YCUH45`
-   (Drobnik KG)**, the same team as the Legal English app, with consistent bundle
+   (Drobnik KG)**, with consistent bundle
    ids (`com.drobnik.chatgptexporter` for the app, `…​.Extension` for the
    extension). Just confirm Xcode is signed into that Apple ID under **Settings →
    Accounts** so it can issue the development certificate.
+
+   > **Forking?** Select **your** team on all four build configs (Signing &
+   > Capabilities → Team) and swap the bundle ids for your own reverse-DNS — or
+   > build unsigned for a quick local test, the way
+   > [CI](.github/workflows/build.yml) does (`CODE_SIGNING_ALLOWED=NO`).
 3. **Run** (⌘R). The container app launches — it's just a shell whose only job is
    to register the extension with Safari.
 4. In Safari: **Settings → Advanced → "Show features for web developers"**, then

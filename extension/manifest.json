@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "ChatGPT → Wiki Exporter",
+  "name": "ChatGPT Exporter",
   "version": "1.0",
-  "description": "Export the ChatGPT conversation you are viewing as Markdown, with incremental top-ups for ongoing chats.",
+  "description": "Export the ChatGPT conversation you are viewing as Markdown, with web-search citations as footnotes and optional image/file download.",
   "icons": {
     "48": "images/icon-48.png",
     "96": "images/icon-96.png",
