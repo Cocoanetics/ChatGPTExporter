@@ -24,13 +24,13 @@ function setBusy(busy) {
   downloadBtn.disabled = busy;
   copyBtn.disabled = busy;
 }
-function showProgress(max) {
+// Render the bar at value/max, hiding it once complete. Never resets to 0, so
+// streaming updates don't make it flicker, and a replayed mid-export value
+// (after re-attach) lands at the right spot.
+function renderProgress(value, max) {
   progressEl.max = max;
-  progressEl.value = 0;
-  progressEl.classList.remove("hidden");
-}
-function setProgress(value) {
   progressEl.value = value;
+  progressEl.classList.toggle("hidden", value >= max);
 }
 function hideProgress() {
   progressEl.classList.add("hidden");
@@ -108,9 +108,7 @@ function renderUpdate(msg) {
       break;
     case "progress":
       setBusy(true);
-      showProgress(msg.max); // ensure the bar is visible (incl. a replayed value)
-      setProgress(msg.value);
-      if (msg.value >= msg.max) hideProgress();
+      renderProgress(msg.value, msg.max);
       break;
     case "done":
       hideProgress();
