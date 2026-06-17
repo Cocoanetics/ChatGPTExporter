@@ -24,8 +24,12 @@
     "nativeMessaging",
     "scripting",
     "activeTab",
-    "clipboardWrite"
+    "clipboardWrite",
+    "notifications"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*"

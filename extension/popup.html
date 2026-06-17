@@ -22,8 +22,10 @@
 
   <p id="status" class="muted">Open a ChatGPT conversation, then Download or Copy. (⌥ for raw JSON)</p>
 
-  <!-- exporter.js defines pageExport(); it is injected into the page by popup.js -->
+  <!-- exporter.js defines pageExport() (injected into the page); export-core.js
+       has the shared Markdown/native helpers. Both load before popup.js. -->
   <script src="exporter.js"></script>
+  <script src="export-core.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

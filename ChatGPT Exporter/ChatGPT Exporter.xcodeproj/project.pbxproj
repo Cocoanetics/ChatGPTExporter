@@ -23,6 +23,8 @@
 		A7DD5D4F2FD6B46600A08EE6 /* popup.html in Resources */ = {isa = PBXBuildFile; fileRef = A7DD5D492FD6B46600A08EE6 /* popup.html */; };
 		A7DD5D502FD6B46600A08EE6 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = A7DD5D4A2FD6B46600A08EE6 /* manifest.json */; };
 		A7DD5D512FD6B46600A08EE6 /* popup.css in Resources */ = {isa = PBXBuildFile; fileRef = A7DD5D4B2FD6B46600A08EE6 /* popup.css */; };
+		A7DD5E012FD6B46600A08EE6 /* background.js in Resources */ = {isa = PBXBuildFile; fileRef = A7DD5E002FD6B46600A08EE6 /* background.js */; };
+		A7DD5E032FD6B46600A08EE6 /* export-core.js in Resources */ = {isa = PBXBuildFile; fileRef = A7DD5E022FD6B46600A08EE6 /* export-core.js */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -69,6 +71,8 @@
 		A7DD5D492FD6B46600A08EE6 /* popup.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = popup.html; path = ../../extension/popup.html; sourceTree = "<group>"; };
 		A7DD5D4A2FD6B46600A08EE6 /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = ../../extension/manifest.json; sourceTree = "<group>"; };
 		A7DD5D4B2FD6B46600A08EE6 /* popup.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; name = popup.css; path = ../../extension/popup.css; sourceTree = "<group>"; };
+		A7DD5E002FD6B46600A08EE6 /* background.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = background.js; path = ../../extension/background.js; sourceTree = "<group>"; };
+		A7DD5E022FD6B46600A08EE6 /* export-core.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "export-core.js"; path = "../../extension/export-core.js"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -145,6 +149,8 @@
 			isa = PBXGroup;
 			children = (
 				A7DD5D462FD6B46600A08EE6 /* exporter.js */,
+				A7DD5E022FD6B46600A08EE6 /* export-core.js */,
+				A7DD5E002FD6B46600A08EE6 /* background.js */,
 				A7DD5D472FD6B46600A08EE6 /* popup.js */,
 				A7DD5D482FD6B46600A08EE6 /* images */,
 				A7DD5D492FD6B46600A08EE6 /* popup.html */,
@@ -259,6 +265,8 @@
 				A7DD5D512FD6B46600A08EE6 /* popup.css in Resources */,
 				A7DD5D502FD6B46600A08EE6 /* manifest.json in Resources */,
 				A7DD5D4C2FD6B46600A08EE6 /* exporter.js in Resources */,
+				A7DD5E032FD6B46600A08EE6 /* export-core.js in Resources */,
+				A7DD5E012FD6B46600A08EE6 /* background.js in Resources */,
 				A7DD5D4D2FD6B46600A08EE6 /* popup.js in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

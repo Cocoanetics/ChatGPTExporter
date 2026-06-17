@@ -1,11 +1,11 @@
 // popup.js
 //
-// Toolbar popup: injects pageExport() into the active ChatGPT tab and delivers
-// the whole conversation as Markdown — to the clipboard or to ~/Downloads via
-// the native handler. "Download Files" instead snapshots into a folder
-// (conversation.md + files/), the native side fetching each image/attachment.
-// Web-search citations always become footnotes. Safari exposes the promise-based
-// `browser.*` namespace.
+// Toolbar popup UI. Copy runs here — it needs the popup's clipboard and is quick
+// (no files). Download is delegated to the background service worker over a port
+// so a long file export keeps running even if the popup loses focus and closes:
+// progress streams back while the popup is open, and the worker posts a
+// notification on completion if it isn't. Markdown assembly + native IPC live in
+// export-core.js (shared with the worker). Safari exposes promise-based browser.*.
 
 const statusEl = document.getElementById("status");
 const downloadBtn = document.getElementById("download");
@@ -13,7 +13,8 @@ const copyBtn = document.getElementById("copy");
 const filesToggle = document.getElementById("files");
 const progressEl = document.getElementById("progress");
 
-const NATIVE_APP = "com.drobnik.chatgptexporter";
+const CHATGPT_URL = /^https:\/\/(chatgpt\.com|chat\.openai\.com)\//;
+const errMsg = (e) => (e && e.message ? e.message : String(e));
 
 function setStatus(message, kind = "") {
   statusEl.textContent = message;
@@ -40,101 +41,36 @@ async function getActiveTab() {
   return tab;
 }
 
-// Native handler writes a UTF-8 text file to ~/Downloads/[dir/]filename.
-async function saveViaNative(filename, text, dir) {
-  const resp = await browser.runtime.sendNativeMessage(NATIVE_APP, { action: "save", filename, text, dir });
-  if (!resp || !resp.ok) throw new Error((resp && resp.error) || "native save failed");
-  return resp.path;
+// Resolve the active tab only if it's a ChatGPT conversation; else null.
+async function chatGPTTab() {
+  const tab = await getActiveTab();
+  if (tab && tab.url && !CHATGPT_URL.test(tab.url)) return null;
+  return tab;
 }
 
-// Native handler fetches `url` (with the bearer token) and writes it.
-async function downloadViaNative(url, filename, dir, token) {
-  const resp = await browser.runtime.sendNativeMessage(NATIVE_APP, { action: "download", url, filename, dir, token });
-  if (!resp || !resp.ok) throw new Error((resp && resp.error) || "file download failed");
-  return resp.path;
-}
-
-function timestamp() {
-  return new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
-}
-function safeName(title) {
-  return title.replace(/[\\/:*?"<>|]+/g, "_").trim().slice(0, 80) || "chatgpt";
-}
-
-// Append GFM footnote definitions for the citations referenced in `md`.
-function appendFootnotes(md, notes) {
-  if (!notes || !notes.length) return md;
-  const used = new Set([...md.matchAll(/\[\^(\d+)\]/g)].map((m) => Number(m[1])));
-  const defs = notes
-    .filter((n) => used.has(n.num))
-    .map((n) => `[^${n.num}]: [${n.title}](${n.url})`);
-  return defs.length ? `${md}\n${defs.join("\n")}\n` : md;
-}
-
-function buildMarkdown(result) {
-  const md = `# ${result.title}\n\n` + result.turns.map((t) => t.md).join("\n");
-  return appendFootnotes(md, result.footnotes);
-}
-
-// Whole-conversation snapshot into ~/Downloads/<Title-ts>/: conversation.md + files/.
-async function exportFolder(result) {
-  const folder = `${safeName(result.title)}-${timestamp()}`;
-  try {
-    await saveViaNative("conversation.md", buildMarkdown(result), folder);
-  } catch (e) {
-    setStatus("Save failed: " + (e && e.message ? e.message : e), "err");
-    return;
-  }
-
-  const files = result.files || [];
-  let ok = 0;
-  let failed = 0;
-  if (files.length) {
-    showProgress(files.length);
-    for (let i = 0; i < files.length; i++) {
-      try {
-        await downloadViaNative(files[i].url, `files/${files[i].name}`, folder, result.token);
-        ok++;
-      } catch (e) {
-        failed++;
-      }
-      setProgress(i + 1);
-    }
-    hideProgress();
-  }
-
-  const note = files.length
-    ? `, ${ok}/${files.length} file${files.length === 1 ? "" : "s"}${failed ? ` (${failed} failed)` : ""}`
-    : ", no files";
-  setStatus(`✓ Saved ${folder}/ to Downloads — ${result.turns.length} turns${note}.`, "ok");
-}
-
-async function runExport(mode, raw) {
+// Copy: export in-page and put the result on the clipboard. Stays in the popup
+// because clipboard access needs its document; it's quick, so there's no
+// popup-lifecycle risk to delegate away.
+async function runCopy(raw) {
   setBusy(true);
-  setStatus((mode === "download" ? "Exporting" : "Copying") + (raw ? " raw JSON" : "") + "…");
-
+  setStatus("Copying" + (raw ? " raw JSON" : "") + "…");
   try {
-    const tab = await getActiveTab();
-    if (tab && tab.url && !/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(tab.url)) {
+    const tab = await chatGPTTab();
+    if (!tab) {
       setStatus("Open this on a ChatGPT conversation tab first.", "err");
       return;
     }
-
-    const withFiles = mode === "download" && !raw && filesToggle.checked;
-    const footnotes = !raw; // citations -> footnotes always (except raw JSON)
-
     let injection;
     try {
       [injection] = await browser.scripting.executeScript({
         target: { tabId: tab.id },
         func: pageExport,
-        args: [raw, withFiles, footnotes],
+        args: [raw, false, !raw],
       });
     } catch (e) {
       setStatus("Couldn't reach the page. Open a ChatGPT chat and try again.", "err");
       return;
     }
-
     const result = injection && injection.result;
     if (!result) {
       setStatus("No response from the page.", "err");
@@ -144,62 +80,74 @@ async function runExport(mode, raw) {
       setStatus(result.error, "err");
       return;
     }
-
-    // ⌥: raw conversation JSON — copy or save depending on the button.
     if (raw) {
       const content = result.raw || "{}";
       const kb = Math.round(content.length / 1024);
-      if (mode === "copy") {
-        try {
-          await navigator.clipboard.writeText(content);
-        } catch (e) {
-          setStatus("Copy failed: " + (e && e.message ? e.message : e), "err");
-          return;
-        }
-        setStatus(`✓ Copied raw JSON (${kb} KB) to the clipboard.`, "ok");
-      } else {
-        const path = await saveViaNative(`${safeName(result.title)}-${timestamp()}-raw.json`, content);
-        setStatus(`✓ Saved raw JSON (${kb} KB) to ${path.split("/").pop()}.`, "ok");
-      }
-      return;
-    }
-
-    // Download Files: whole-conversation folder snapshot.
-    if (withFiles) {
-      await exportFolder(result);
-      return;
-    }
-
-    // Default: the whole chat as Markdown, to the clipboard or a single .md.
-    const md = buildMarkdown(result);
-    if (mode === "copy") {
-      try {
-        await navigator.clipboard.writeText(md);
-      } catch (e) {
-        setStatus("Copy failed: " + (e && e.message ? e.message : e), "err");
-        return;
-      }
-      setStatus("✓ Copied the chat to the clipboard.", "ok");
+      await navigator.clipboard.writeText(content);
+      setStatus(`✓ Copied raw JSON (${kb} KB) to the clipboard.`, "ok");
     } else {
-      let path;
-      try {
-        path = await saveViaNative(`${safeName(result.title)}-${timestamp()}.md`, md);
-      } catch (e) {
-        setStatus("Save failed: " + (e && e.message ? e.message : e), "err");
-        return;
-      }
-      setStatus(`✓ Saved ${path.split("/").pop()} to Downloads.`, "ok");
+      await navigator.clipboard.writeText(buildMarkdown(result));
+      setStatus("✓ Copied the chat to the clipboard.", "ok");
     }
   } catch (e) {
-    setStatus("Error: " + (e && e.message ? e.message : String(e)), "err");
+    setStatus("Copy failed: " + errMsg(e), "err");
   } finally {
-    hideProgress();
     setBusy(false);
   }
 }
 
-downloadBtn.addEventListener("click", (e) => runExport("download", e.altKey));
-copyBtn.addEventListener("click", (e) => runExport("copy", e.altKey));
+// Reflect a worker update in the UI (only fires while the popup is open).
+function renderUpdate(msg) {
+  if (!msg) return;
+  switch (msg.type) {
+    case "status":
+      setStatus(msg.text);
+      break;
+    case "progress":
+      if (msg.value === 0) showProgress(msg.max);
+      else setProgress(msg.value);
+      if (msg.value >= msg.max) hideProgress();
+      break;
+    case "done":
+      hideProgress();
+      setStatus(msg.text, "ok");
+      setBusy(false);
+      break;
+    case "error":
+      hideProgress();
+      setStatus(msg.text, "err");
+      setBusy(false);
+      break;
+  }
+}
+
+// Download: hand the job to the background worker so it outlives this popup. We
+// reflect its progress while open; if the popup closes the worker finishes on
+// its own and posts a notification.
+async function startDownload(raw) {
+  setBusy(true);
+  setStatus("Exporting" + (raw ? " raw JSON" : "") + "…");
+  let tab;
+  try {
+    tab = await chatGPTTab();
+  } catch (e) {
+    setStatus("Error: " + errMsg(e), "err");
+    setBusy(false);
+    return;
+  }
+  if (!tab) {
+    setStatus("Open this on a ChatGPT conversation tab first.", "err");
+    setBusy(false);
+    return;
+  }
+  const withFiles = !raw && filesToggle.checked;
+  const port = browser.runtime.connect({ name: "export" });
+  port.onMessage.addListener(renderUpdate);
+  port.postMessage({ type: "start", tabId: tab.id, raw, withFiles });
+}
+
+downloadBtn.addEventListener("click", (e) => startDownload(e.altKey));
+copyBtn.addEventListener("click", (e) => runCopy(e.altKey));
 
 // Holding Option (Alt) switches both buttons to the raw-JSON variant.
 function setAltLabels(alt) {
