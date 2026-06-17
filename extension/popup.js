@@ -96,16 +96,20 @@ async function runCopy(raw) {
   }
 }
 
-// Reflect a worker update in the UI (only fires while the popup is open).
+// Reflect a worker update in the UI. Fires while the popup is open, and also as
+// replayed state right after the popup re-attaches to an in-flight export — so
+// status/progress mark the popup busy (disabling the buttons) until done/error.
 function renderUpdate(msg) {
   if (!msg) return;
   switch (msg.type) {
     case "status":
+      setBusy(true);
       setStatus(msg.text);
       break;
     case "progress":
-      if (msg.value === 0) showProgress(msg.max);
-      else setProgress(msg.value);
+      setBusy(true);
+      showProgress(msg.max); // ensure the bar is visible (incl. a replayed value)
+      setProgress(msg.value);
       if (msg.value >= msg.max) hideProgress();
       break;
     case "done":
@@ -141,10 +145,15 @@ async function startDownload(raw) {
     return;
   }
   const withFiles = !raw && filesToggle.checked;
-  const port = browser.runtime.connect({ name: "export" });
-  port.onMessage.addListener(renderUpdate);
-  port.postMessage({ type: "start", tabId: tab.id, raw, withFiles });
+  workerPort.postMessage({ type: "start", tabId: tab.id, raw, withFiles });
 }
+
+// One worker connection for the popup's lifetime. Opening it on load — not just
+// on Download — lets a reopened popup re-attach to an export already in flight
+// and resume showing progress (the worker replays the current state on connect).
+// Copy doesn't use it.
+const workerPort = browser.runtime.connect({ name: "export" });
+workerPort.onMessage.addListener(renderUpdate);
 
 downloadBtn.addEventListener("click", (e) => startDownload(e.altKey));
 copyBtn.addEventListener("click", (e) => runCopy(e.altKey));

@@ -5,7 +5,8 @@
 // loses focus, killing any in-flight work. So the popup only triggers the export
 // (and handles Copy, which needs its own clipboard); everything that writes to
 // ~/Downloads runs here instead, reporting progress back over a port while the
-// popup is open and falling back to a notification once it's gone.
+// popup is open and falling back to a notification once it's gone. If the popup
+// is reopened mid-export it re-attaches and resumes showing live progress.
 //
 // importScripts pulls in pageExport() (the page-injected exporter) and the
 // shared Markdown/native helpers — the same files popup.html loads via <script>.
@@ -26,6 +27,46 @@ function notify(text) {
     // notifications unavailable — the files are saved regardless
   }
 }
+
+// One in-flight export at a time. We keep its latest state here so a popup that
+// reconnects mid-export (closed and reopened) can be replayed the current
+// status/progress instead of dropping back to the idle UI. `livePort` is
+// whichever popup is listening right now, or null when none is open.
+let livePort = null;
+let job = null; // { status, progress: { value, max } | null } while running, else null
+
+// Send an update to the live popup (if any) and remember it for replay.
+function emit(msg) {
+  if (job) {
+    if (msg.type === "status") job.status = msg.text;
+    else if (msg.type === "progress") job.progress = { value: msg.value, max: msg.max };
+  }
+  if (livePort) {
+    try {
+      livePort.postMessage(msg);
+    } catch (e) {
+      /* popup vanished between the check and the post */
+    }
+  }
+}
+
+// Deliver the terminal result and end the job — to the live popup if one is
+// open, otherwise as a notification (the popup closed mid-export).
+function finish(ok, text) {
+  let delivered = false;
+  if (livePort) {
+    try {
+      livePort.postMessage({ type: ok ? "done" : "error", text });
+      delivered = true;
+    } catch (e) {
+      /* fall through to notification */
+    }
+  }
+  if (!delivered) notify(text);
+  job = null;
+}
+
+const ctx = { report: emit, finish };
 
 // Whole-conversation snapshot into ~/Downloads/<Title-ts>/: conversation.md + files/.
 async function exportFolder(result, ctx) {
@@ -116,34 +157,32 @@ async function runExport({ tabId, raw, withFiles }, ctx) {
 // notification instead.
 browser.runtime.onConnect.addListener((port) => {
   if (port.name !== "export") return;
-  let alive = true;
-  port.onDisconnect.addListener(() => {
-    alive = false;
-  });
-  const ctx = {
-    report(msg) {
-      if (!alive) return;
+  livePort = port;
+
+  // Re-attach: if an export is already running, replay its current state so the
+  // reopened popup resumes showing progress instead of the idle UI.
+  if (job) {
+    if (job.status) {
       try {
-        port.postMessage(msg);
-      } catch (e) {
-        /* popup went away between the check and the post */
-      }
-    },
-    finish(ok, text) {
-      if (alive) {
-        try {
-          port.postMessage({ type: ok ? "done" : "error", text });
-          return;
-        } catch (e) {
-          /* fall through to notification */
-        }
-      }
-      notify(text);
-    },
-  };
+        port.postMessage({ type: "status", text: job.status });
+      } catch (e) {}
+    }
+    if (job.progress) {
+      try {
+        port.postMessage({ type: "progress", value: job.progress.value, max: job.progress.max });
+      } catch (e) {}
+    }
+  }
+
+  port.onDisconnect.addListener(() => {
+    if (livePort === port) livePort = null;
+  });
+
   port.onMessage.addListener((msg) => {
     if (msg && msg.type === "start") {
-      runExport(msg, ctx).catch((e) => ctx.finish(false, "Error: " + errMsg(e)));
+      if (job) return; // one export at a time; ignore duplicate starts
+      job = { status: "", progress: null };
+      runExport(msg, ctx).catch((e) => finish(false, "Error: " + errMsg(e)));
     }
   });
 });
