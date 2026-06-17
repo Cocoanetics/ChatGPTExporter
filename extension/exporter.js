@@ -194,6 +194,32 @@ async function pageExport(raw, withFiles, footnotes) {
   if (footnotes) result.footnotes = notes;
 
   if (withFiles) {
+    // A 1500-turn thread can carry hundreds of files. Resolve them with bounded
+    // concurrency (not one slow round-trip at a time), and give every request a
+    // timeout — fetch has none, so a single stalled request would otherwise hang
+    // the whole export on "Exporting…" until the user gives up and retries.
+    const POOL = 8;
+    const REQUEST_TIMEOUT_MS = 20000;
+    const mapPool = async (items, fn) => {
+      const out = new Array(items.length);
+      let next = 0;
+      const worker = async () => {
+        while (next < items.length) {
+          const i = next++;
+          out[i] = await fn(items[i], i);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(POOL, items.length) }, worker));
+      return out;
+    };
+    const fetchT = (url, opts) => {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+      return fetch(url, Object.assign({}, opts, { signal: ctrl.signal })).finally(() =>
+        clearTimeout(timer)
+      );
+    };
+
     // The files endpoint returns JSON { download_url, file_name } or redirects
     // to the signed content URL; the native side re-fetches it with the token.
     const resolveURL = async (fid) => {
@@ -203,7 +229,7 @@ async function pageExport(raw, withFiles, footnotes) {
       ];
       for (const ep of endpoints) {
         try {
-          const r = await fetch(ep, { headers: { Authorization: `Bearer ${accessToken}` } });
+          const r = await fetchT(ep, { headers: { Authorization: `Bearer ${accessToken}` } });
           if (!r.ok) continue;
           const ct = r.headers.get("content-type") || "";
           if (ct.includes("application/json")) {
@@ -228,9 +254,11 @@ async function pageExport(raw, withFiles, footnotes) {
 
     const files = [];
     const nameByFile = {};
-    for (const fid of new Set(pendingFiles)) {
-      const resolved = await resolveURL(fid);
-      if (!resolved) continue;
+    const fids = [...new Set(pendingFiles)];
+    const resolvedList = await mapPool(fids, (fid) => resolveURL(fid));
+    fids.forEach((fid, idx) => {
+      const resolved = resolvedList[idx];
+      if (!resolved) return;
       const meta = attMeta[fid] || {};
       const nameHint = resolved.name || meta.name;
       const mime = resolved.mime || meta.mime || "";
@@ -245,21 +273,22 @@ async function pageExport(raw, withFiles, footnotes) {
       const name = `${fid}${ext}`;
       nameByFile[fid] = name;
       files.push({ fileId: fid, url: resolved.url, name });
-    }
-    for (const sf of sandboxFiles) {
-      // interpreter/download returns JSON { download_url: <signed estuary URL> },
-      // like the files endpoint — resolve it here, then let the native side fetch
-      // the signed URL (with the bearer token), same as images.
+    });
+    // interpreter/download returns JSON { download_url: <signed estuary URL> },
+    // like the files endpoint — resolve it here, then let the native side fetch
+    // the signed URL (with the bearer token), same as images.
+    const sandboxResolved = await mapPool(sandboxFiles, async (sf) => {
       try {
-        const r = await fetch(sf.url, { headers: { Authorization: `Bearer ${accessToken}` } });
-        if (!r.ok) continue;
+        const r = await fetchT(sf.url, { headers: { Authorization: `Bearer ${accessToken}` } });
+        if (!r.ok) return null;
         const j = await r.json();
         const dl = j.download_url || (j.metadata && j.metadata.download_url);
-        if (dl) files.push({ fileId: sf.name, url: dl, name: sf.name });
+        return dl ? { fileId: sf.name, url: dl, name: sf.name } : null;
       } catch (e) {
-        // sandbox file unavailable (ephemeral / expired)
+        return null; // sandbox file unavailable (ephemeral / expired)
       }
-    }
+    });
+    for (const f of sandboxResolved) if (f) files.push(f);
 
     const sub = (md) =>
       md
