@@ -212,12 +212,20 @@ async function pageExport(raw, withFiles, footnotes) {
       await Promise.all(Array.from({ length: Math.min(POOL, items.length) }, worker));
       return out;
     };
-    const fetchT = (url, opts) => {
+    // Run fetch + response handling under one timeout: the abort timer stays
+    // armed until `use(response)` finishes — body reads included — not just until
+    // the headers arrive. So a stall *during the body* (e.g. r.json()) is aborted
+    // too, and a single stuck file resolution is actually skipped instead of
+    // hanging the pool on "Exporting…".
+    const withTimeout = async (url, opts, use) => {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
-      return fetch(url, Object.assign({}, opts, { signal: ctrl.signal })).finally(() =>
-        clearTimeout(timer)
-      );
+      try {
+        const r = await fetch(url, Object.assign({}, opts, { signal: ctrl.signal }));
+        return await use(r);
+      } finally {
+        clearTimeout(timer);
+      }
     };
 
     // The files endpoint returns JSON { download_url, file_name } or redirects
@@ -227,26 +235,30 @@ async function pageExport(raw, withFiles, footnotes) {
         `/backend-api/files/download/${encodeURIComponent(fid)}`,
         `/backend-api/files/${encodeURIComponent(fid)}/download`,
       ];
+      const auth = { headers: { Authorization: `Bearer ${accessToken}` } };
       for (const ep of endpoints) {
         try {
-          const r = await fetchT(ep, { headers: { Authorization: `Bearer ${accessToken}` } });
-          if (!r.ok) continue;
-          const ct = r.headers.get("content-type") || "";
-          if (ct.includes("application/json")) {
-            const j = await r.json();
-            const url = j.download_url || (j.metadata && j.metadata.download_url);
-            if (url) {
+          const resolved = await withTimeout(ep, auth, async (r) => {
+            if (!r.ok) return null;
+            const ct = r.headers.get("content-type") || "";
+            if (ct.includes("application/json")) {
+              const j = await r.json();
+              const url = j.download_url || (j.metadata && j.metadata.download_url);
+              if (!url) return null;
               return {
                 url,
                 mime: (j.metadata && j.metadata.mime_type) || j.mime_type || null,
                 name: (j.metadata && j.metadata.file_name) || j.file_name || null,
               };
             }
-          } else if (r.redirected || !ct.includes("text/html")) {
-            return { url: r.url, mime: ct || null, name: null };
-          }
+            if (r.redirected || !ct.includes("text/html")) {
+              return { url: r.url, mime: ct || null, name: null };
+            }
+            return null;
+          });
+          if (resolved) return resolved;
         } catch (e) {
-          // try the next shape
+          // try the next shape (timeout/abort included)
         }
       }
       return null;
@@ -279,11 +291,16 @@ async function pageExport(raw, withFiles, footnotes) {
     // the signed URL (with the bearer token), same as images.
     const sandboxResolved = await mapPool(sandboxFiles, async (sf) => {
       try {
-        const r = await fetchT(sf.url, { headers: { Authorization: `Bearer ${accessToken}` } });
-        if (!r.ok) return null;
-        const j = await r.json();
-        const dl = j.download_url || (j.metadata && j.metadata.download_url);
-        return dl ? { fileId: sf.name, url: dl, name: sf.name } : null;
+        return await withTimeout(
+          sf.url,
+          { headers: { Authorization: `Bearer ${accessToken}` } },
+          async (r) => {
+            if (!r.ok) return null;
+            const j = await r.json();
+            const dl = j.download_url || (j.metadata && j.metadata.download_url);
+            return dl ? { fileId: sf.name, url: dl, name: sf.name } : null;
+          }
+        );
       } catch (e) {
         return null; // sandbox file unavailable (ephemeral / expired)
       }
