@@ -143,15 +143,36 @@ async function startDownload(raw) {
     return;
   }
   const withFiles = !raw && filesToggle.checked;
-  workerPort.postMessage({ type: "start", tabId: tab.id, raw, withFiles });
+  // An idle MV3 service worker can drop the on-load port while the popup just
+  // sits open, so (re)connect before posting and retry once on a stale-port throw
+  // — otherwise the start never reaches the worker and the popup hangs on "Exporting…".
+  const start = { type: "start", tabId: tab.id, raw, withFiles };
+  try {
+    ensurePort().postMessage(start);
+  } catch (e) {
+    connectWorker().postMessage(start);
+  }
 }
 
-// One worker connection for the popup's lifetime. Opening it on load — not just
-// on Download — lets a reopened popup re-attach to an export already in flight
-// and resume showing progress (the worker replays the current state on connect).
+// Worker connection, opened on load so a reopened popup can re-attach to an
+// export already in flight (the worker replays the current state on connect).
+// Because an idle service worker may drop the port while the popup sits open,
+// connectWorker() is reused via ensurePort() to refresh it before each start.
 // Copy doesn't use it.
-const workerPort = browser.runtime.connect({ name: "export" });
-workerPort.onMessage.addListener(renderUpdate);
+let workerPort = null;
+function connectWorker() {
+  const p = browser.runtime.connect({ name: "export" });
+  p.onMessage.addListener(renderUpdate);
+  p.onDisconnect.addListener(() => {
+    if (workerPort === p) workerPort = null;
+  });
+  workerPort = p;
+  return p;
+}
+function ensurePort() {
+  return workerPort || connectWorker();
+}
+connectWorker();
 
 downloadBtn.addEventListener("click", (e) => startDownload(e.altKey));
 copyBtn.addEventListener("click", (e) => runCopy(e.altKey));
