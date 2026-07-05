@@ -97,36 +97,104 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
     }
 
+    /// Structured failure so the JS side can tell retryable failures (expired
+    /// signed URL, network blip, 5xx) from permanent ones (404, disk full)
+    /// instead of collapsing everything into an opaque string.
+    private static func failure(_ error: String, code: String, status: Int? = nil,
+                                retryable: Bool) -> [String: Any] {
+        var out: [String: Any] = ["ok": false, "error": error, "code": code, "retryable": retryable]
+        if let status = status { out["status"] = status }
+        return out
+    }
+
+    /// Dedicated session instead of URLSession.shared: shared's 7-day resource
+    /// timeout would let one trickling connection wedge a JS download-pool slot
+    /// (and, via the extension's single-job guard, block all future exports).
+    /// The delegate strips Authorization when a redirect leaves the original
+    /// host, so the ChatGPT bearer token is never replayed to arbitrary targets.
+    private static let redirectSanitizer = RedirectSanitizer()
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 60    // idle timeout between reads
+        config.timeoutIntervalForResource = 300  // hard cap per file
+        return URLSession(configuration: config, delegate: redirectSanitizer, delegateQueue: nil)
+    }()
+
     private static func download(from url: URL, filename: String, dir: String?, token: String?,
                                  completion: @escaping ([String: Any]) -> Void) {
         guard let dest = destination(filename: filename, dir: dir, unique: false) else {
-            return completion(["ok": false, "error": "Could not resolve the Downloads path."])
+            return completion(failure("Could not resolve the Downloads path.", code: "io", retryable: false))
         }
         var request = URLRequest(url: url)
         if let token = token, !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        let task = URLSession.shared.downloadTask(with: request) { tempURL, response, error in
-            if let error = error {
-                return completion(["ok": false, "error": error.localizedDescription])
+        let task = session.downloadTask(with: request) { tempURL, response, error in
+            if let urlError = error as? URLError {
+                let transient: [URLError.Code] = [.timedOut, .networkConnectionLost,
+                                                  .notConnectedToInternet, .cannotConnectToHost,
+                                                  .dnsLookupFailed]
+                return completion(failure(urlError.localizedDescription,
+                                          code: urlError.code == .timedOut ? "timeout" : "network",
+                                          retryable: transient.contains(urlError.code)))
             }
-            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                return completion(["ok": false, "error": "HTTP \(http.statusCode)"])
+            if let error = error {
+                return completion(failure(error.localizedDescription, code: "network", retryable: true))
+            }
+            let http = response as? HTTPURLResponse
+            if let http = http, !(200..<300).contains(http.statusCode) {
+                // 401/403 usually means the pre-signed URL expired mid-export;
+                // 408/429/5xx are transient. 404 and friends are not worth a retry.
+                let retryable = [401, 403, 408, 429].contains(http.statusCode) || http.statusCode >= 500
+                return completion(failure("HTTP \(http.statusCode)", code: "http",
+                                          status: http.statusCode, retryable: retryable))
             }
             guard let tempURL = tempURL else {
-                return completion(["ok": false, "error": "No data received."])
+                return completion(failure("No data received.", code: "network", retryable: true))
+            }
+            // A 200 with an HTML body where a binary was expected is almost
+            // always a styled error page (expired link, login wall) — failing
+            // beats saving it verbatim as chart.png and counting a success.
+            let ext = dest.pathExtension.lowercased()
+            if let mime = http?.mimeType, mime == "text/html", ext != "html", ext != "htm" {
+                return completion(failure("Got an HTML page instead of the file.",
+                                          code: "content", retryable: true))
             }
             do {
                 if FileManager.default.fileExists(atPath: dest.path) {
-                    try FileManager.default.removeItem(at: dest)
+                    // Atomic replace: concurrent writers to one destination can't
+                    // interleave a remove and a move into corruption.
+                    _ = try FileManager.default.replaceItemAt(dest, withItemAt: tempURL)
+                } else {
+                    do {
+                        try FileManager.default.moveItem(at: tempURL, to: dest)
+                    } catch CocoaError.fileWriteFileExists {
+                        // Lost a race with a concurrent download of the same name.
+                        _ = try FileManager.default.replaceItemAt(dest, withItemAt: tempURL)
+                    }
                 }
-                try FileManager.default.moveItem(at: tempURL, to: dest)
                 completion(["ok": true, "path": dest.path])
             } catch {
-                completion(["ok": false, "error": error.localizedDescription])
+                completion(failure(error.localizedDescription, code: "io", retryable: false))
             }
         }
         task.resume()
+    }
+
+    /// Strips the Authorization header when a redirect crosses to a different
+    /// host, so the ChatGPT bearer token is never forwarded to arbitrary
+    /// redirect targets (URLSession would otherwise re-send it).
+    final class RedirectSanitizer: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            var request = request
+            if request.url?.host != task.originalRequest?.url?.host {
+                request.setValue(nil, forHTTPHeaderField: "Authorization")
+            }
+            completionHandler(request)
+        }
     }
 
     /// If the target exists, insert " 2", " 3", … before the extension.

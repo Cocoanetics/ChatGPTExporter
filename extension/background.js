@@ -156,7 +156,7 @@ if (browser.alarms) {
 const ctx = { report: emit, finish };
 
 // Whole-conversation snapshot into ~/Downloads/<Title-ts>/: conversation.md + files/.
-async function exportFolder(result, ctx) {
+async function exportFolder(result, ctx, tabId) {
   const folder = `${safeName(result.title)}-${timestamp()}`;
   if (job) {
     job.folder = folder; // names the folder in an "interrupted" report
@@ -172,6 +172,7 @@ async function exportFolder(result, ctx) {
   let ok = 0;
   let failed = 0;
   let done = 0;
+  const failures = []; // { f, retryable } — feeds the second-chance pass below
   if (files.length) {
     ctx.report({ type: "progress", value: 0, max: files.length });
     // Fetch concurrently (bounded) rather than one-at-a-time — a few hundred
@@ -186,6 +187,9 @@ async function exportFolder(result, ctx) {
           ok++;
         } catch (e) {
           failed++;
+          // Only kind:"file" entries can be re-resolved in the page; sandbox
+          // URLs are one-shot (the interpreter endpoint already re-signed them).
+          failures.push({ f, retryable: !!e.retryable && f.kind === "file" });
         }
         ctx.report({ type: "progress", value: ++done, max: files.length });
       }
@@ -193,10 +197,55 @@ async function exportFolder(result, ctx) {
     await Promise.all(Array.from({ length: Math.min(POOL, files.length) }, worker));
   }
 
-  const note = files.length
-    ? `, ${ok}/${files.length} file${files.length === 1 ? "" : "s"}${failed ? ` (${failed} failed)` : ""}`
-    : ", no files";
-  ctx.finish(true, `✓ Saved ${folder}/ to Downloads — ${result.turns.length} turns${note}.`);
+  // Second chance: pre-signed URLs minted before a long download run can be
+  // expired by the time the pool reaches them (401/403), and network blips
+  // happen. Re-resolve fresh URLs in the page and retry each such file once.
+  const retriable = failures.filter((x) => x.retryable);
+  if (retriable.length && tabId != null) {
+    ctx.report({
+      type: "status",
+      text: `Retrying ${retriable.length} failed file${retriable.length === 1 ? "" : "s"}…`,
+    });
+    let fresh = null;
+    try {
+      const [inj] = await browser.scripting.executeScript({
+        target: { tabId },
+        func: pageResolveFiles,
+        args: [retriable.map((x) => x.f.fileId)],
+      });
+      fresh = inj && inj.result;
+    } catch (e) {
+      /* tab gone — keep the first-pass counts */
+    }
+    if (fresh && fresh.urls) {
+      for (const x of retriable) {
+        const url = fresh.urls[x.f.fileId];
+        if (!url) continue;
+        try {
+          await downloadViaNative(url, `files/${x.f.name}`, folder, fresh.token || result.token);
+          ok++;
+          failed--;
+        } catch (e) {
+          /* stays failed */
+        }
+      }
+    }
+  }
+
+  // Report what actually happened — including files that never even resolved
+  // to a URL (result.unresolved), which used to vanish from the count.
+  const unresolvedNote = result.unresolved ? `; ${result.unresolved} could not be resolved` : "";
+  const note =
+    files.length || result.unresolved
+      ? `, ${ok}/${files.length} file${files.length === 1 ? "" : "s"}${
+          failed ? ` (${failed} failed)` : ""
+        }${unresolvedNote}`
+      : ", no files";
+  const allGood = !failed && !result.unresolved;
+  ctx.finish(
+    true,
+    `${allGood ? "✓ " : ""}Saved ${folder}/ to Downloads — ${result.turns.length} turns${note}.`
+  );
 }
 
 async function runExport({ tabId, raw, withFiles }, ctx) {
@@ -230,7 +279,7 @@ async function runExport({ tabId, raw, withFiles }, ctx) {
   }
 
   // Download Files: whole-conversation folder snapshot.
-  if (withFiles) return exportFolder(result, ctx);
+  if (withFiles) return exportFolder(result, ctx, tabId);
 
   // Default: the whole chat as a single .md.
   const md = buildMarkdown(result);

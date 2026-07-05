@@ -79,9 +79,39 @@ async function saveViaNative(filename, text, dir) {
   return resp.path;
 }
 
-// Native handler fetches `url` (with the bearer token) and writes it.
+// Native handler fetches `url` (with the bearer token) and writes it. Failures
+// carry the native side's { code, status, retryable } so callers can retry
+// transient ones (expired signed URL, network blip) but not permanent ones.
+// The JS-side deadline is a backstop for a wedged native call, which would
+// otherwise hold one of the download-pool slots forever — the native session's
+// own resource timeout (300s) is the primary guard.
 async function downloadViaNative(url, filename, dir, token) {
-  const resp = await browser.runtime.sendNativeMessage(NATIVE_APP, { action: "download", url, filename, dir, token });
-  if (!resp || !resp.ok) throw new Error((resp && resp.error) || "file download failed");
-  return resp.path;
+  const NATIVE_DEADLINE_MS = 6 * 60 * 1000;
+  let timer;
+  const deadline = new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      const e = new Error("native download timed out");
+      e.code = "timeout";
+      e.retryable = true;
+      reject(e);
+    }, NATIVE_DEADLINE_MS);
+  });
+  try {
+    const resp = await Promise.race([
+      browser.runtime.sendNativeMessage(NATIVE_APP, { action: "download", url, filename, dir, token }),
+      deadline,
+    ]);
+    if (!resp || !resp.ok) {
+      const e = new Error((resp && resp.error) || "file download failed");
+      if (resp) {
+        e.code = resp.code;
+        e.status = resp.status;
+        e.retryable = !!resp.retryable;
+      }
+      throw e;
+    }
+    return resp.path;
+  } finally {
+    clearTimeout(timer);
+  }
 }

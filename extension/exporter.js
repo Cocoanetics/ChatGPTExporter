@@ -20,17 +20,49 @@
 // links. `footnotes` converts web-search citations to GFM footnotes.
 
 async function pageExport(raw, withFiles, footnotes) {
+  // Two concurrent runs (a re-click racing a restarted worker) would race the
+  // same files/ destinations — refuse the second instead.
+  if (window.__chatgptExporterBusy) {
+    return { error: "An export of this chat is already running." };
+  }
+  window.__chatgptExporterBusy = true;
+  try {
+    return await run();
+  } finally {
+    window.__chatgptExporterBusy = false;
+  }
+
+  async function run() {
   const convId = location.pathname.split("/").filter(Boolean).pop();
   if (!convId) {
     return { error: "No conversation is open. Open a chat first, then export." };
   }
 
+  // Every fetch gets a deadline — fetch() has none, and a single stalled
+  // request would otherwise hang the export (and the single-job guard with it)
+  // forever. The abort timer stays armed until `use(response)` finishes — body
+  // reads included — so a stall *during* r.json() is aborted too.
+  const withDeadline = async (url, opts, ms, use) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ms);
+    try {
+      const r = await fetch(url, Object.assign({}, opts || {}, { signal: ctrl.signal }));
+      return await use(r);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   let accessToken;
   try {
-    const session = await fetch("/api/auth/session").then((r) => r.json());
+    const session = await withDeadline("/api/auth/session", null, 15000, (r) => {
+      // A transient server error must not masquerade as "logged out".
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    });
     accessToken = session && session.accessToken;
   } catch (e) {
-    return { error: "Could not read the ChatGPT session." };
+    return { error: "Could not read the ChatGPT session (" + e.message + "). Try again." };
   }
   if (!accessToken) {
     return { error: "Not logged in to ChatGPT (no access token)." };
@@ -38,15 +70,17 @@ async function pageExport(raw, withFiles, footnotes) {
 
   let convo;
   try {
-    const res = await fetch(`/backend-api/conversation/${convId}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!res.ok) {
-      return { error: `Failed to fetch conversation (HTTP ${res.status}).` };
-    }
-    convo = await res.json();
+    convo = await withDeadline(
+      `/backend-api/conversation/${convId}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+      60000,
+      (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      }
+    );
   } catch (e) {
-    return { error: "Network error fetching the conversation: " + e.message };
+    return { error: "Failed to fetch the conversation: " + e.message };
   }
 
   // Active path: current_node -> parent -> ... -> root, reversed.
@@ -97,11 +131,24 @@ async function pageExport(raw, withFiles, footnotes) {
   // Code-interpreter files are linked as [text](sandbox:/mnt/data/<name>). The
   // live interpreter/download endpoint serves them (bearer-authenticated, like
   // image files); the sandbox is ephemeral, so old chats may 404.
+  const usedSandboxNames = new Set();
   const collectSandbox = (text, msgId) => {
     for (const mm of text.matchAll(/sandbox:(\/[^\s)]+)/g)) {
       const sandboxPath = mm[1];
       if (sandboxByPath[sandboxPath]) continue;
-      const name = (sandboxPath.split("/").pop() || "file").replace(/[\\/:*?"<>|]+/g, "_");
+      let name = (sandboxPath.split("/").pop() || "file").replace(/[\\/:*?"<>|]+/g, "_");
+      // Distinct sandbox paths can share a basename (…/draft/fig.png vs
+      // …/final/fig.png); both landing on one files/<name> destination would
+      // make two concurrent downloads clobber each other.
+      if (usedSandboxNames.has(name)) {
+        const dot = name.lastIndexOf(".");
+        const stem = dot > 0 ? name.slice(0, dot) : name;
+        const ext = dot > 0 ? name.slice(dot) : "";
+        let i = 2;
+        while (usedSandboxNames.has(`${stem} (${i})${ext}`)) i++;
+        name = `${stem} (${i})${ext}`;
+      }
+      usedSandboxNames.add(name);
       sandboxByPath[sandboxPath] = name;
       sandboxFiles.push({
         name,
@@ -195,9 +242,8 @@ async function pageExport(raw, withFiles, footnotes) {
 
   if (withFiles) {
     // A 1500-turn thread can carry hundreds of files. Resolve them with bounded
-    // concurrency (not one slow round-trip at a time), and give every request a
-    // timeout — fetch has none, so a single stalled request would otherwise hang
-    // the whole export on "Exporting…" until the user gives up and retries.
+    // concurrency (not one slow round-trip at a time); withDeadline (above)
+    // keeps any single stuck request from hanging the pool.
     const POOL = 8;
     const REQUEST_TIMEOUT_MS = 20000;
     const mapPool = async (items, fn) => {
@@ -212,24 +258,46 @@ async function pageExport(raw, withFiles, footnotes) {
       await Promise.all(Array.from({ length: Math.min(POOL, items.length) }, worker));
       return out;
     };
-    // Run fetch + response handling under one timeout: the abort timer stays
-    // armed until `use(response)` finishes — body reads included — not just until
-    // the headers arrive. So a stall *during the body* (e.g. r.json()) is aborted
-    // too, and a single stuck file resolution is actually skipped instead of
-    // hanging the pool on "Exporting…".
-    const withTimeout = async (url, opts, use) => {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
-      try {
-        const r = await fetch(url, Object.assign({}, opts, { signal: ctrl.signal }));
-        return await use(r);
-      } finally {
-        clearTimeout(timer);
-      }
-    };
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
     // The files endpoint returns JSON { download_url, file_name } or redirects
     // to the signed content URL; the native side re-fetches it with the token.
+    // Transient failures (429 rate limiting, 5xx, timeouts) are retried against
+    // the SAME endpoint shape with a short backoff — falling straight through
+    // to the next shape would silently drop the file (and, on a 429, double
+    // the request rate at the worst moment).
+    const resolveOnce = (ep, auth) =>
+      withDeadline(ep, auth, REQUEST_TIMEOUT_MS, async (r) => {
+        if (!r.ok) {
+          if (r.status === 429 || r.status >= 500) {
+            const retryAfter = Number(r.headers.get("retry-after")) || 0;
+            return { retryInMs: Math.min((retryAfter || 2) * 1000, 10000) };
+          }
+          return null;
+        }
+        const ct = r.headers.get("content-type") || "";
+        if (ct.includes("application/json")) {
+          const j = await r.json();
+          const url = j.download_url || (j.metadata && j.metadata.download_url);
+          if (!url) return null;
+          return {
+            value: {
+              url,
+              mime: (j.metadata && j.metadata.mime_type) || j.mime_type || null,
+              name: (j.metadata && j.metadata.file_name) || j.file_name || null,
+            },
+          };
+        }
+        if (r.redirected || !ct.includes("text/html")) {
+          // The URL is all we need — don't keep downloading the body into the
+          // tab (the native side fetches the content itself).
+          try {
+            if (r.body) r.body.cancel();
+          } catch (e) {}
+          return { value: { url: r.url, mime: ct || null, name: null } };
+        }
+        return null;
+      });
     const resolveURL = async (fid) => {
       const endpoints = [
         `/backend-api/files/download/${encodeURIComponent(fid)}`,
@@ -237,28 +305,21 @@ async function pageExport(raw, withFiles, footnotes) {
       ];
       const auth = { headers: { Authorization: `Bearer ${accessToken}` } };
       for (const ep of endpoints) {
-        try {
-          const resolved = await withTimeout(ep, auth, async (r) => {
-            if (!r.ok) return null;
-            const ct = r.headers.get("content-type") || "";
-            if (ct.includes("application/json")) {
-              const j = await r.json();
-              const url = j.download_url || (j.metadata && j.metadata.download_url);
-              if (!url) return null;
-              return {
-                url,
-                mime: (j.metadata && j.metadata.mime_type) || j.mime_type || null,
-                name: (j.metadata && j.metadata.file_name) || j.file_name || null,
-              };
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const out = await resolveOnce(ep, auth);
+            if (out && out.retryInMs) {
+              await sleep(out.retryInMs * (attempt + 1));
+              continue;
             }
-            if (r.redirected || !ct.includes("text/html")) {
-              return { url: r.url, mime: ct || null, name: null };
-            }
-            return null;
-          });
-          if (resolved) return resolved;
-        } catch (e) {
-          // try the next shape (timeout/abort included)
+            if (out) return out.value;
+            break; // definitive no from this shape — try the next one
+          } catch (e) {
+            // Timeout/network: one cheap retry, then move on — each attempt
+            // already cost up to REQUEST_TIMEOUT_MS.
+            if (attempt >= 1) break;
+            await sleep(1000);
+          }
         }
       }
       return null;
@@ -266,11 +327,15 @@ async function pageExport(raw, withFiles, footnotes) {
 
     const files = [];
     const nameByFile = {};
+    let unresolved = 0; // files we KNOW about but could not get a URL for
     const fids = [...new Set(pendingFiles)];
     const resolvedList = await mapPool(fids, (fid) => resolveURL(fid));
     fids.forEach((fid, idx) => {
       const resolved = resolvedList[idx];
-      if (!resolved) return;
+      if (!resolved) {
+        unresolved++;
+        return;
+      }
       const meta = attMeta[fid] || {};
       const nameHint = resolved.name || meta.name;
       const mime = resolved.mime || meta.mime || "";
@@ -284,28 +349,39 @@ async function pageExport(raw, withFiles, footnotes) {
           : ".bin");
       const name = `${fid}${ext}`;
       nameByFile[fid] = name;
-      files.push({ fileId: fid, url: resolved.url, name });
+      // kind:"file" marks entries the worker can re-resolve (pageResolveFiles)
+      // and retry if the download fails with a retryable error.
+      files.push({ fileId: fid, url: resolved.url, name, kind: "file" });
     });
     // interpreter/download returns JSON { download_url: <signed estuary URL> },
     // like the files endpoint — resolve it here, then let the native side fetch
     // the signed URL (with the bearer token), same as images.
     const sandboxResolved = await mapPool(sandboxFiles, async (sf) => {
       try {
-        return await withTimeout(
+        return await withDeadline(
           sf.url,
           { headers: { Authorization: `Bearer ${accessToken}` } },
+          REQUEST_TIMEOUT_MS,
           async (r) => {
             if (!r.ok) return null;
             const j = await r.json();
             const dl = j.download_url || (j.metadata && j.metadata.download_url);
-            return dl ? { fileId: sf.name, url: dl, name: sf.name } : null;
+            return dl ? { fileId: sf.name, url: dl, name: sf.name, kind: "sandbox" } : null;
           }
         );
       } catch (e) {
         return null; // sandbox file unavailable (ephemeral / expired)
       }
     });
-    for (const f of sandboxResolved) if (f) files.push(f);
+    // Only links whose file actually resolved may be rewritten to files/… —
+    // the sandbox is ephemeral, so in an old chat every one of these can 404,
+    // and a blind rewrite would fill the export with dead local links.
+    const sandboxOK = new Set();
+    for (const f of sandboxResolved) {
+      if (!f) continue;
+      files.push(f);
+      sandboxOK.add(f.name);
+    }
 
     const sub = (md) =>
       md
@@ -317,14 +393,95 @@ async function pageExport(raw, withFiles, footnotes) {
           const orig = (attMeta[fid] && attMeta[fid].name) || local || "file";
           return local ? `📎 [${orig}](files/${local})` : `📎 ${orig} _(unavailable)_`;
         })
-        .replace(/sandbox:(\/[^\s)]+)/g, (m0, p) =>
-          sandboxByPath[p] ? `files/${sandboxByPath[p]}` : m0
-        );
+        .replace(/\[([^\]]*)\]\(sandbox:(\/[^\s)]+)\)/g, (m0, label, p) => {
+          const n = sandboxByPath[p];
+          if (n && sandboxOK.has(n)) return `[${label}](files/${n})`;
+          return `${label} _(file no longer available)_`;
+        })
+        .replace(/sandbox:(\/[^\s)]+)/g, (m0, p) => {
+          const n = sandboxByPath[p];
+          return n && sandboxOK.has(n) ? `files/${n}` : m0;
+        });
     result.turns = turns.map((t) => ({ id: t.id, role: t.role, md: sub(t.md) }));
     result.files = files;
     result.token = accessToken;
+    if (unresolved) result.unresolved = unresolved;
   }
 
   if (raw) result.raw = JSON.stringify(convo, null, 2);
   return result;
+  } // run()
+}
+
+// pageResolveFiles also runs INSIDE the chatgpt.com page (injected by
+// background.js) to mint fresh download URLs for files whose first download
+// failed with a retryable error: pre-signed URLs expire while a long export
+// drains the download pool, so the tail of a big export needs re-signing. It
+// must be self-contained for the same executeScript reasons as pageExport.
+// Returns { token, urls: { fid -> url } }; fids it can't resolve are absent.
+async function pageResolveFiles(fids) {
+  const out = { token: null, urls: {} };
+  const withDeadline = async (url, opts, ms, use) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ms);
+    try {
+      const r = await fetch(url, Object.assign({}, opts || {}, { signal: ctrl.signal }));
+      return await use(r);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  try {
+    const session = await withDeadline("/api/auth/session", null, 15000, (r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    });
+    out.token = session && session.accessToken;
+  } catch (e) {
+    return out;
+  }
+  if (!out.token) return out;
+
+  const auth = { headers: { Authorization: `Bearer ${out.token}` } };
+  const resolveOne = async (fid) => {
+    const endpoints = [
+      `/backend-api/files/download/${encodeURIComponent(fid)}`,
+      `/backend-api/files/${encodeURIComponent(fid)}/download`,
+    ];
+    for (const ep of endpoints) {
+      try {
+        const url = await withDeadline(ep, auth, 15000, async (r) => {
+          if (!r.ok) return null;
+          const ct = r.headers.get("content-type") || "";
+          if (ct.includes("application/json")) {
+            const j = await r.json();
+            return j.download_url || (j.metadata && j.metadata.download_url) || null;
+          }
+          if (r.redirected || !ct.includes("text/html")) {
+            try {
+              if (r.body) r.body.cancel();
+            } catch (e) {}
+            return r.url;
+          }
+          return null;
+        });
+        if (url) return url;
+      } catch (e) {
+        // try the next shape
+      }
+    }
+    return null;
+  };
+  // Small pool — this is a second pass over a (usually) short failure list.
+  const POOL = 4;
+  let next = 0;
+  const worker = async () => {
+    while (next < fids.length) {
+      const fid = fids[next++];
+      const url = await resolveOne(fid);
+      if (url) out.urls[fid] = url;
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(POOL, fids.length) }, worker));
+  return out;
 }
