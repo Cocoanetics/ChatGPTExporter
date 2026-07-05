@@ -113,6 +113,35 @@ async function pageExport(raw, withFiles, footnotes) {
     }
   };
 
+  // Assistant text can carry inline `{{file:file-XXX}}` placeholders for
+  // canvas/tool-generated files (e.g. a report saved by computer.sync_file) —
+  // a separate mechanism from metadata.attachments (user-uploaded files) and
+  // image_asset_pointer parts (images). The file's real name lives in a
+  // metadata array of citation-like objects `{ type: "file", file_id,
+  // file_name, matched_text }`, but the key that array is stored under is
+  // scraping-obfuscated and rotates (observed as e.g. "n7jupd_crefs" instead
+  // of "content_references") — so scan values by shape, not by key name.
+  const FILE_TOKEN = /\{\{file:([^{}]+)\}\}/g;
+  const crefFileName = (m, fid) => {
+    for (const v of Object.values((m && m.metadata) || {})) {
+      if (!Array.isArray(v)) continue;
+      for (const item of v) {
+        if (item && item.type === "file" && item.file_id === fid && item.file_name) {
+          return item.file_name;
+        }
+      }
+    }
+    return null;
+  };
+  const subFileTokens = (text, m) =>
+    text.replace(FILE_TOKEN, (_, fid) => {
+      if (!withFiles) return "_[file omitted]_";
+      pendingFiles.push(fid);
+      const name = crefFileName(m, fid);
+      if (name && !attMeta[fid]) attMeta[fid] = { name, mime: null };
+      return `@@FILE@@${fid}@@`;
+    });
+
   // Image parts emit an ASCII sentinel (substituted before return). Non-image
   // attachments are handled separately (fileMarks).
   const rawTextOf = (m) => {
@@ -151,6 +180,11 @@ async function pageExport(raw, withFiles, footnotes) {
         raw = raw.slice(0, ref.start_idx) + markers + raw.slice(ref.end_idx);
       }
     }
+    // Runs after footnote splicing, which relies on content_references
+    // start_idx/end_idx offsets computed against the untouched text — a
+    // length-changing substitution has to happen after those offsets are
+    // consumed, not before.
+    raw = subFileTokens(raw, m);
     return clean(raw);
   };
 
