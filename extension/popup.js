@@ -193,9 +193,13 @@ async function pollJournal() {
   if (j) {
     if (Date.now() - (j.lastUpdateAt || j.startedAt) > JOB_STALE_MS) {
       // Heartbeat went stale: the worker died mid-export and nothing will
-      // finish this job. Clear it so reconcile()/we don't report it twice.
-      jobStore.remove("job");
-      leaveBusy("The export was interrupted — check Downloads, then try again.", "err");
+      // finish this job. Record the verdict (result before removal, same
+      // commit order as the worker) so reconcile() doesn't report it twice
+      // and a reopened popup shows what happened.
+      const text = "The export was interrupted — check Downloads, then try again.";
+      await jobStore.set("lastResult", { ok: false, text, at: Date.now(), jobId: j.id });
+      await jobStore.remove("job");
+      leaveBusy(text, "err");
       return;
     }
     if (j.status) setStatus(j.status);
@@ -250,6 +254,7 @@ async function startDownload(raw) {
       return;
     }
   }
+  const postedAt = Date.now();
   clearTimeout(startWatchdog);
   startWatchdog = setTimeout(async () => {
     startWatchdog = null;
@@ -259,7 +264,19 @@ async function startDownload(raw) {
       enterBusy();
       if (j.status) setStatus(j.status);
       if (j.progress) renderProgress(j.progress.value, j.progress.max);
-    } else if (!exportBusy) {
+      return;
+    }
+    if (exportBusy) return; // a live update beat us to it
+    // A quick export can start AND finish inside the grace window with every
+    // port message swallowed — then the job is already gone but its outcome is
+    // in lastResult. Only silence on both keys means the worker never got the
+    // start; reporting "unreachable" for a completed export would invite the
+    // duplicate-download re-click this journal exists to prevent.
+    const r = await jobStore.get("lastResult");
+    if (r && r.at >= postedAt) {
+      ackResult();
+      leaveBusy(r.text, r.ok ? "ok" : "err");
+    } else {
       setStatus("Couldn't reach the export worker — please try again.", "err");
       setBusy(false);
     }

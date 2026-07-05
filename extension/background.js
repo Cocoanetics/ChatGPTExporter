@@ -77,9 +77,14 @@ function emit(msg) {
 // can swallow a post without throwing — so the popup must ack the terminal
 // message within a grace period; otherwise the notification fires just as if
 // the popup were closed.
-function finish(ok, text) {
-  jobStore.set("lastResult", { ok, text, at: Date.now(), jobId: job && job.id });
-  jobStore.remove("job");
+async function finish(ok, text) {
+  // Await the terminal writes, in commit order: result first, then the job
+  // removal. Fire-and-forget here would let a poll observe "no job, no result"
+  // (spurious "interrupted" after a real completion), or a suspension right
+  // after delivery strand the journal with a stale job entry that the next
+  // reconcile() would misreport as an interrupted export.
+  await jobStore.set("lastResult", { ok, text, at: Date.now(), jobId: job && job.id });
+  await jobStore.remove("job");
   endJob();
   const msg = { type: ok ? "done" : "error", text };
   if (livePort) {
@@ -141,8 +146,10 @@ async function reconcile() {
     p && p.max
       ? `${where} was interrupted — ${p.value} of ${p.max} files saved. Run it again to get the rest.`
       : `${where} was interrupted before finishing. Please run it again.`;
-  await jobStore.remove("job");
+  // Same commit order as finish(): result before job removal, so a concurrent
+  // popup poll never sees the journal empty on both keys.
   await jobStore.set("lastResult", { ok: false, text, at: Date.now(), jobId: stale.id });
+  await jobStore.remove("job");
   notify(text);
 }
 reconcile(); // runs on every worker (re)start
