@@ -190,7 +190,11 @@ async function exportFolder(result, ctx, tabId) {
       while (next < files.length) {
         const f = files[next++];
         try {
-          await downloadViaNative(f.url, `files/${f.name}`, folder, result.token);
+          if (f.content != null) {
+            await saveViaNative(`files/${f.name}`, f.content, folder);
+          } else {
+            await downloadViaNative(f.url, `files/${f.name}`, folder, result.token);
+          }
           ok++;
         } catch (e) {
           failed++;

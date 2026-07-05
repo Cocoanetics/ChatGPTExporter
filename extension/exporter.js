@@ -17,7 +17,10 @@
 // `raw` (Option-click) attaches the full conversation JSON. `withFiles` resolves
 // every image and attachment (PDFs, …) to a pre-signed URL, returns them as
 // `files: [{ fileId, url, name }]`, and rewrites placeholders to files/<name>
-// links. `footnotes` converts web-search citations to GFM footnotes.
+// links. Canvas documents need no server round-trip (their content already
+// sits in the conversation JSON), so those entries carry `{ fileId, name,
+// content }` instead of a `url` — the caller must branch on which is present.
+// `footnotes` converts web-search citations to GFM footnotes.
 
 async function pageExport(raw, withFiles, footnotes) {
   // Two concurrent runs (a re-click racing a restarted worker) would race the
@@ -134,6 +137,67 @@ async function pageExport(raw, withFiles, footnotes) {
   const attMeta = {}; // fileId -> { name, mime }
   const sandboxFiles = []; // code-interpreter files: { url, name }
   const sandboxByPath = {}; // sandbox path -> local filename
+
+  // Canvas ("canmore" tool) documents: ChatGPT's side-panel editor. The doc is
+  // created via a hidden assistant call (recipient "canmore.create_textdoc",
+  // content_type "code", a JSON payload with the full text) and edited via
+  // "canmore.update_textdoc" calls (regex pattern/replacement patches). Both
+  // calls are recipient-filtered out of the visible turns below, and the
+  // content never appears in message text at all — unlike the file-cref case
+  // above, there's no placeholder token to substitute, so the only way to
+  // notice a canvas doc exists is the turn_exchange_id it shares with the
+  // tool's confirmation message, which carries the canonical (non-obfuscated)
+  // { textdoc_id, title } in metadata.canvas.
+  const canvasByExchange = {}; // turn_exchange_id -> { textdocId, title }
+  const canvasDocs = {}; // textdocId -> { title, content }
+  {
+    let pendingPayload = null;
+    for (const { msg } of path) {
+      const recipient = msg.recipient || "";
+      if (msg.author && msg.author.role === "assistant" && /^canmore\.(create|update)_textdoc$/.test(recipient)) {
+        const c = msg.content || {};
+        try {
+          pendingPayload = c.content_type === "code" && typeof c.text === "string" ? JSON.parse(c.text) : null;
+        } catch (e) {
+          pendingPayload = null;
+        }
+        continue;
+      }
+      const canvas = msg.metadata && msg.metadata.canvas;
+      if (msg.author && msg.author.role === "tool" && canvas && canvas.textdoc_id) {
+        const exch = msg.metadata.turn_exchange_id;
+        if (exch) canvasByExchange[exch] = { textdocId: canvas.textdoc_id, title: canvas.title };
+        if (pendingPayload) {
+          const existing = canvasDocs[canvas.textdoc_id];
+          if (typeof pendingPayload.content === "string") {
+            canvasDocs[canvas.textdoc_id] = { title: canvas.title || pendingPayload.name, content: pendingPayload.content };
+          } else if (Array.isArray(pendingPayload.updates) && existing) {
+            let content = existing.content;
+            for (const u of pendingPayload.updates) {
+              if (!u || typeof u.pattern !== "string" || typeof u.replacement !== "string") continue;
+              try {
+                content = content.replace(new RegExp(u.pattern, u.multiple ? "g" : ""), u.replacement);
+              } catch (e) {
+                // model emitted an invalid regex — leave this one patch unapplied
+              }
+            }
+            canvasDocs[canvas.textdoc_id] = { title: canvas.title || existing.title, content };
+          }
+        }
+        pendingPayload = null;
+      }
+    }
+  }
+  const canvasFileIds = new Set();
+  const canvasMark = (m) => {
+    const exch = m.metadata && m.metadata.turn_exchange_id;
+    const ref = exch && canvasByExchange[exch];
+    const doc = ref && canvasDocs[ref.textdocId];
+    if (!doc) return "";
+    if (!withFiles) return `\n\n_[canvas document "${doc.title}" omitted]_`;
+    canvasFileIds.add(ref.textdocId);
+    return `\n\n@@FILE@@canvas:${ref.textdocId}@@`;
+  };
 
   // Code-interpreter files are linked as [text](sandbox:/mnt/data/<name>). The
   // live interpreter/download endpoint serves them (bearer-authenticated, like
@@ -272,7 +336,7 @@ async function pageExport(raw, withFiles, footnotes) {
       if (a && a.id) attMeta[a.id] = { name: a.name, mime: a.mime_type };
     }
 
-    const text = (renderText(msg) + fileMarks(msg)).trim();
+    const text = (renderText(msg) + fileMarks(msg) + canvasMark(msg)).trim();
     if (!text) continue;
     if (withFiles) collectSandbox(text, msg.id);
     turns.push({ id, role, md: `## ${speaker}\n\n${text}\n` });
@@ -422,6 +486,21 @@ async function pageExport(raw, withFiles, footnotes) {
       if (!f) continue;
       files.push(f);
       sandboxOK.add(f.name);
+    }
+
+    // Canvas docs are already fully resolved (their content came from the
+    // conversation JSON itself, not a server round-trip) — no fetch needed,
+    // just a name. The filename uses the textdoc_id (always filesystem-safe);
+    // the human title goes in the link text via attMeta, same convention as
+    // the file-cref case above.
+    for (const textdocId of canvasFileIds) {
+      const doc = canvasDocs[textdocId];
+      if (!doc) continue;
+      const fid = `canvas:${textdocId}`;
+      const name = `canvas-${textdocId}.md`;
+      nameByFile[fid] = name;
+      attMeta[fid] = { name: `${doc.title || textdocId}.md`, mime: "text/markdown" };
+      files.push({ fileId: fid, name, content: doc.content });
     }
 
     const sub = (md) =>
