@@ -50,11 +50,28 @@ const jobStore = {
   },
 };
 
+// Local wall-clock time (not UTC — filenames shouldn't carry yesterday's date
+// for an evening export), with seconds: minute precision made two exports in
+// the same minute collide on one filename, which masked accidental duplicates
+// as " 2" copies and silently merged same-minute folder exports.
 function timestamp() {
-  return new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+    `-${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`
+  );
 }
 function safeName(title) {
-  return title.replace(/[\\/:*?"<>|]+/g, "_").trim().slice(0, 80) || "chatgpt";
+  const cleaned = title
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    // Leading dots make Finder-hidden files (a chat titled ".zshrc tweaks"
+    // would "vanish" from Downloads); trailing dots/spaces are awkward on
+    // other filesystems.
+    .replace(/^[.\s]+|[.\s]+$/g, "");
+  // Slice by code point, not UTF-16 unit — cutting a surrogate pair in half
+  // yields a lone surrogate that breaks the native-message serialization.
+  return [...cleaned].slice(0, 80).join("") || "chatgpt";
 }
 
 // Append GFM footnote definitions for the citations referenced in `md`.

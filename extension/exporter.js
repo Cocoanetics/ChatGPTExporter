@@ -37,6 +37,13 @@ async function pageExport(raw, withFiles, footnotes) {
   if (!convId) {
     return { error: "No conversation is open. Open a chat first, then export." };
   }
+  // Conversation URLs end in a UUID (chatgpt.com/c/<uuid>, /g/<gizmo>/c/<uuid>).
+  // On other chatgpt.com pages (library, settings, a fresh chat) the last path
+  // segment is a word like "library" — catch that here instead of surfacing a
+  // confusing "Failed to fetch conversation (HTTP 404)" later.
+  if (!/^[0-9a-f-]{20,}$/i.test(convId)) {
+    return { error: "This page isn't a conversation. Open a chat first, then export." };
+  }
 
   // Every fetch gets a deadline — fetch() has none, and a single stalled
   // request would otherwise hang the export (and the single-job guard with it)

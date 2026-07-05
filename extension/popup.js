@@ -314,11 +314,18 @@ downloadBtn.addEventListener("click", (e) => startDownload(e.altKey));
 copyBtn.addEventListener("click", (e) => runCopy(e.altKey));
 
 // Holding Option (Alt) switches both buttons to the raw-JSON variant.
+let altShown = false;
 function setAltLabels(alt) {
+  if (alt === altShown) return;
+  altShown = alt;
   downloadBtn.textContent = alt ? "Download JSON" : "Download";
   copyBtn.textContent = alt ? "Copy JSON" : "Copy";
 }
 const syncAlt = (e) => setAltLabels(e.altKey);
 window.addEventListener("keydown", syncAlt);
 window.addEventListener("keyup", syncAlt);
+// keydown can't catch Option already held when the popup opens, but the first
+// mouse movement carries the modifier state — without this, a click would
+// export raw JSON while the button still reads "Download".
+window.addEventListener("mousemove", syncAlt);
 window.addEventListener("blur", () => setAltLabels(false));
