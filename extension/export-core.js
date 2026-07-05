@@ -8,6 +8,48 @@
 
 const NATIVE_APP = "com.drobnik.chatgptexporter";
 
+// --- Durable job state -------------------------------------------------------
+// Safari suspends an MV3 service worker aggressively — even mid-await — so the
+// in-flight export is journaled here rather than held in worker memory. The
+// worker writes every status/progress change plus a heartbeat; the popup polls
+// the journal as ground truth while busy (port messages are just the fast
+// path); a freshly started worker reconciles an orphaned entry into an
+// "interrupted" report. storage.session is preferred (gone with the browser
+// session); older Safari falls back to storage.local.
+
+const JOB_STALE_MS = 45000; // no heartbeat for this long ⇒ the job's worker is dead
+
+const jobStore = {
+  area() {
+    const s = typeof browser !== "undefined" && browser.storage;
+    return (s && (s.session || s.local)) || null;
+  },
+  async get(key) {
+    const a = this.area();
+    if (!a) return null;
+    try {
+      const o = await a.get(key);
+      return (o && o[key]) || null;
+    } catch (e) {
+      return null;
+    }
+  },
+  async set(key, value) {
+    const a = this.area();
+    if (!a) return;
+    try {
+      await a.set({ [key]: value });
+    } catch (e) {}
+  },
+  async remove(key) {
+    const a = this.area();
+    if (!a) return;
+    try {
+      await a.remove(key);
+    } catch (e) {}
+  },
+};
+
 function timestamp() {
   return new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
 }

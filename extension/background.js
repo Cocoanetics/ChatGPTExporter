@@ -8,12 +8,26 @@
 // popup is open and falling back to a notification once it's gone. If the popup
 // is reopened mid-export it re-attaches and resumes showing live progress.
 //
-// importScripts pulls in pageExport() (the page-injected exporter) and the
-// shared Markdown/native helpers — the same files popup.html loads via <script>.
+// Safari also suspends *this* worker aggressively — even mid-await — so nothing
+// authoritative lives only in memory. The in-flight job is journaled via
+// jobStore (export-core.js): every status/progress change and a 15s heartbeat
+// update it, finish() replaces it with a lastResult record, and a freshly
+// (re)started worker reconciles — an orphaned journal entry means a previous
+// instance died mid-export, which gets reported instead of silently dropped.
+// A repeating alarm bounds how long such a death can go unnoticed while no
+// popup is open. The popup polls the same journal as ground truth, so a lost
+// port message can no longer freeze it.
+//
+// importScripts pulls in pageExport()/pageResolveFiles() (the page-injected
+// exporters) and the shared Markdown/native helpers — the same files popup.html
+// loads via <script>.
 
 importScripts("exporter.js", "export-core.js");
 
 const errMsg = (e) => (e && e.message ? e.message : String(e));
+
+const HEARTBEAT_MS = 15000; // journal liveness cadence; well under JOB_STALE_MS
+const KEEPALIVE_ALARM = "export-watchdog";
 
 function notify(text) {
   try {
@@ -28,18 +42,25 @@ function notify(text) {
   }
 }
 
-// One in-flight export at a time. We keep its latest state here so a popup that
-// reconnects mid-export (closed and reopened) can be replayed the current
-// status/progress instead of dropping back to the idle UI. `livePort` is
+// One in-flight export at a time. `job` is this instance's working copy of the
+// journal entry; the journal (jobStore) is the durable truth. `livePort` is
 // whichever popup is listening right now, or null when none is open.
 let livePort = null;
-let job = null; // { status, progress: { value, max } | null } while running, else null
+let job = null; // { id, kind, startedAt, lastUpdateAt, status, progress, folder } while running
+let heartbeat = null;
+let ackTimer = null; // finish() falls back to a notification unless the popup acks in time
 
-// Send an update to the live popup (if any) and remember it for replay.
+function journalJob() {
+  if (job) jobStore.set("job", job);
+}
+
+// Send an update to the live popup (if any) and journal it for replay/polling.
 function emit(msg) {
   if (job) {
     if (msg.type === "status") job.status = msg.text;
     else if (msg.type === "progress") job.progress = { value: msg.value, max: msg.max };
+    job.lastUpdateAt = Date.now();
+    journalJob();
   }
   if (livePort) {
     try {
@@ -50,20 +71,86 @@ function emit(msg) {
   }
 }
 
-// Deliver the terminal result and end the job — to the live popup if one is
-// open, otherwise as a notification (the popup closed mid-export).
+// Deliver the terminal result and end the job. The journal entry is swapped for
+// a lastResult record *first*, so the outcome survives whatever happens to this
+// worker or the popup next. Port delivery is unverifiable — a stale Safari port
+// can swallow a post without throwing — so the popup must ack the terminal
+// message within a grace period; otherwise the notification fires just as if
+// the popup were closed.
 function finish(ok, text) {
-  let delivered = false;
+  jobStore.set("lastResult", { ok, text, at: Date.now(), jobId: job && job.id });
+  jobStore.remove("job");
+  endJob();
+  const msg = { type: ok ? "done" : "error", text };
   if (livePort) {
+    clearTimeout(ackTimer);
+    ackTimer = setTimeout(() => notify(text), 1500);
     try {
-      livePort.postMessage({ type: ok ? "done" : "error", text });
-      delivered = true;
+      livePort.postMessage(msg);
     } catch (e) {
-      /* fall through to notification */
+      clearTimeout(ackTimer);
+      notify(text);
     }
+  } else {
+    notify(text);
   }
-  if (!delivered) notify(text);
+}
+
+function beginJob({ tabId, raw, withFiles }) {
+  job = {
+    id: `${tabId}-${Date.now()}`,
+    kind: raw ? "raw" : withFiles ? "folder" : "md",
+    startedAt: Date.now(),
+    lastUpdateAt: Date.now(),
+    status: "",
+    progress: null,
+    folder: null,
+  };
+  journalJob();
+  // The heartbeat keeps the journal provably live — the popup and reconcile()
+  // read a stale lastUpdateAt as "the worker died" — and gives Safari periodic
+  // extension-API activity during long native awaits.
+  heartbeat = setInterval(() => {
+    if (job) {
+      job.lastUpdateAt = Date.now();
+      journalJob();
+    }
+  }, HEARTBEAT_MS);
+  // The alarm outlives this instance: if Safari kills the worker mid-export,
+  // the next alarm wakes a fresh one whose reconcile() reports the interrupted
+  // job — bounding "silent truncation" to about a minute.
+  if (browser.alarms) browser.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 });
+}
+
+function endJob() {
   job = null;
+  clearInterval(heartbeat);
+  heartbeat = null;
+  if (browser.alarms) browser.alarms.clear(KEEPALIVE_ALARM);
+}
+
+// A journal entry with no live job in this instance means a previous worker
+// died mid-export: the folder on disk may look complete but isn't. Report it
+// and clear the journal so the next export starts clean.
+async function reconcile() {
+  const stale = await jobStore.get("job");
+  if (!stale || job) return; // nothing orphaned, or we're the instance running it
+  const p = stale.progress;
+  const where = stale.folder ? `Export of "${stale.folder}"` : "The export";
+  const text =
+    p && p.max
+      ? `${where} was interrupted — ${p.value} of ${p.max} files saved. Run it again to get the rest.`
+      : `${where} was interrupted before finishing. Please run it again.`;
+  await jobStore.remove("job");
+  await jobStore.set("lastResult", { ok: false, text, at: Date.now(), jobId: stale.id });
+  notify(text);
+}
+reconcile(); // runs on every worker (re)start
+
+if (browser.alarms) {
+  browser.alarms.onAlarm.addListener((a) => {
+    if (a.name === KEEPALIVE_ALARM) reconcile();
+  });
 }
 
 const ctx = { report: emit, finish };
@@ -71,6 +158,10 @@ const ctx = { report: emit, finish };
 // Whole-conversation snapshot into ~/Downloads/<Title-ts>/: conversation.md + files/.
 async function exportFolder(result, ctx) {
   const folder = `${safeName(result.title)}-${timestamp()}`;
+  if (job) {
+    job.folder = folder; // names the folder in an "interrupted" report
+    journalJob();
+  }
   try {
     await saveViaNative("conversation.md", buildMarkdown(result), folder);
   } catch (e) {
@@ -154,7 +245,9 @@ async function runExport({ tabId, raw, withFiles }, ctx) {
 // The popup connects a port and posts { type: "start", … }. Progress/status flow
 // back over that port while it's open; if the popup closes mid-export the port
 // disconnects but the job keeps running, and the final result arrives as a
-// notification instead.
+// notification instead. A "start" is acked immediately (the popup's watchdog
+// treats silence as a dead worker), and a duplicate start gets the running
+// job's state back rather than being silently swallowed.
 browser.runtime.onConnect.addListener((port) => {
   if (port.name !== "export") return;
   livePort = port;
@@ -179,9 +272,31 @@ browser.runtime.onConnect.addListener((port) => {
   });
 
   port.onMessage.addListener((msg) => {
-    if (msg && msg.type === "start") {
-      if (job) return; // one export at a time; ignore duplicate starts
-      job = { status: "", progress: null };
+    if (!msg) return;
+    if (msg.type === "done-ack") {
+      // The popup rendered the terminal state — no notification needed.
+      clearTimeout(ackTimer);
+      ackTimer = null;
+      return;
+    }
+    if (msg.type === "start") {
+      if (job) {
+        // One export at a time — answer with what's already running instead of
+        // leaving the clicker staring at an unacknowledged "Starting…".
+        try {
+          port.postMessage({ type: "status", text: job.status || "Exporting…" });
+          if (job.progress) {
+            port.postMessage({ type: "progress", value: job.progress.value, max: job.progress.max });
+          }
+        } catch (e) {}
+        return;
+      }
+      beginJob(msg);
+      try {
+        port.postMessage({ type: "ack", jobId: job.id });
+      } catch (e) {
+        /* popup will find the journal via its watchdog */
+      }
       runExport(msg, ctx).catch((e) => finish(false, "Error: " + errMsg(e)));
     }
   });
