@@ -31,7 +31,15 @@ const hasImage = (m) => ((m.content && m.content.parts) || []).some(isImagePart)
 
 const rawTextOf = (m) => {
   const parts = (m.content && m.content.parts) || [];
-  return parts.map((p) => (typeof p === "string" ? p : isImagePart(p) ? "_[image omitted]_" : "")).join("\n\n");
+  return parts
+    .map((p) => {
+      if (typeof p === "string") return p;
+      if (isImagePart(p)) return "_[image omitted]_";
+      // Voice-mode turns carry their transcript as an object part (exporter.js).
+      if (p && p.content_type === "audio_transcription" && typeof p.text === "string") return p.text;
+      return "";
+    })
+    .join("\n\n");
 };
 const clean = (s) =>
   stripDirectives(stripCitations(s)).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
