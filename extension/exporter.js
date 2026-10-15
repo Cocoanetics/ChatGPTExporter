@@ -275,6 +275,14 @@ async function pageExport(raw, withFiles, footnotes) {
           }
           return "_[image omitted]_";
         }
+        // Voice-mode turns carry their transcript as an object part, not a
+        // string: { content_type: "audio_transcription", text }. A chat whose
+        // opening segment was spoken would otherwise export without it (the
+        // other voice parts — audio_asset_pointer and friends — are just
+        // pointers to the recording and stay omitted).
+        if (p && p.content_type === "audio_transcription" && typeof p.text === "string") {
+          return p.text;
+        }
         return "";
       })
       .join("\n\n");
